@@ -8,7 +8,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import { sanitizeGLB } from './sanitize.js';
 
-const HDRI_URL = 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_48d_partly_cloudy_puresky_2k.hdr';
+const HDRI_URL = './hdri/wide_street_01_2k.hdr';
 const DRACO_DECODER = 'https://www.gstatic.com/draco/v1/decoders/';
 const KTX2_TRANSCODER = 'https://unpkg.com/three@0.184.0/examples/jsm/libs/basis/';
 

@@ -9,19 +9,22 @@ const host = document.getElementById('canvas-wrap');
 const $ = (id) => document.getElementById(id);
 
 const { renderer, backend } = await createRenderer(host);
-$('renderer-tag').textContent = backend.toUpperCase();
+// Expose ASAP — before any DOM access that could throw and abort module init.
+window.__renderer = renderer;
+const tagEl = $('renderer-tag');
+if (tagEl) tagEl.textContent = backend.toUpperCase();
 
 const { scene, sun, hemi, contactShadows } = createScene();
-const camera = createCamera(host);
-const controls = createControls(camera, renderer.domElement);
-const loader = getGLTFLoader(renderer);
-
-// Expose live instances for in-browser lighting debug from the console.
-// scene.js is a factory module so the actual singletons live here.
-window.__renderer = renderer;
 window.__scene = scene;
 window.__sunLight = sun;
 window.__ambientLight = hemi;
+
+const camera = createCamera(host);
+const controls = createControls(camera, renderer.domElement);
+const loader = getGLTFLoader(renderer);
+window.__camera = camera;
+window.__controls = controls;
+console.log('[lab] globals ready:', { renderer: !!window.__renderer, scene: !!window.__scene, sun: !!window.__sunLight, ambient: !!window.__ambientLight });
 
 let envTex = null;
 let currentModel = null;
@@ -87,6 +90,7 @@ async function loadModel(url) {
     enableShadows(root);
     scene.add(root);
     currentModel = root;
+    window.__currentModel = root;
     frameObject(root, camera, controls);
 
     $('filesize').textContent = formatBytes(bytes);
