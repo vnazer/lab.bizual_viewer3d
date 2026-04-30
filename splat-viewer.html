@@ -24,13 +24,19 @@
   #type-badge.splat   { background: rgba(170,80,255,0.2);  border-color: rgba(170,80,255,0.5);  color: #d4b3ff; }
   #type-badge.lidar   { background: rgba(255,140,40,0.2);  border-color: rgba(255,140,40,0.5);  color: #ffcb8c; }
   #type-badge.mesh    { background: rgba(80,200,120,0.2);  border-color: rgba(80,200,120,0.5);  color: #b3e6c2; }
-  #flip-y {
-    margin-top: 10px; background: rgba(255,255,255,0.1); color: #fff;
-    border: 1px solid rgba(255,255,255,0.2); padding: 6px 12px;
-    border-radius: 6px; cursor: pointer; font-size: 12px; display: none;
+  .tool-btn {
+    background: rgba(255,255,255,0.1); color: #fff;
+    border: 1px solid rgba(255,255,255,0.2); padding: 6px 10px;
+    border-radius: 6px; cursor: pointer; font-size: 11px;
   }
-  #point-size-row { display: none; margin-top: 10px; align-items: center; gap: 8px; font-size: 12px; }
-  #point-size-row input { flex: 1; }
+  .tool-btn:hover { background: rgba(255,255,255,0.18); }
+  .tool-btn.active { background: rgba(120,160,255,0.25); border-color: rgba(120,160,255,0.6); }
+  #tools { display: none; margin-top: 12px; }
+  #tools .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  #tools .row label { font-size: 11px; opacity: 0.7; align-self: center; min-width: 40px; }
+  #tools select { background: rgba(255,255,255,0.08); color: #fff; border: 1px solid rgba(255,255,255,0.2); padding: 4px 8px; border-radius: 6px; font-size: 11px; flex: 1; }
+  #tools input[type="range"] { flex: 1; }
+  #point-size-row, #wireframe-row { display: none; }
   #drop-zone {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     background: rgba(0,0,0,0.85); backdrop-filter: blur(20px); z-index: 100;
@@ -68,10 +74,37 @@
   <p>Detecta automáticamente y renderiza Gaussian Splats, point clouds (LIDAR / photogrammetry) y meshes. Acepta <code>.spz</code>, <code>.ply</code>, <code>.splat</code>, <code>.ksplat</code>.</p>
   <p style="margin-top: 8px;"><strong>Controles:</strong> click + drag rota, scroll zoom, shift + drag pan.</p>
   <div id="type-badge"></div>
-  <button id="flip-y">⇅ Flip Y</button>
-  <div id="point-size-row">
-    <span>Punto</span>
-    <input type="range" id="point-size" min="0.0005" max="0.05" step="0.0005" value="0.005" />
+
+  <div id="tools">
+    <div class="row">
+      <button class="tool-btn" id="view-reset" title="Encuadrar al modelo">⊕ Reset</button>
+      <button class="tool-btn" id="view-top" title="Vista superior">▲ Top</button>
+      <button class="tool-btn" id="view-front" title="Vista frontal">■ Front</button>
+      <button class="tool-btn" id="view-right" title="Vista derecha">▶ Right</button>
+      <button class="tool-btn" id="view-iso" title="Vista isométrica">◆ Iso</button>
+    </div>
+    <div class="row">
+      <button class="tool-btn" id="bg-toggle" title="Cambiar fondo">🌗 Fondo</button>
+      <button class="tool-btn" id="flip-y" title="Invertir Y">⇅ Flip Y</button>
+      <button class="tool-btn" id="autorotate" title="Auto-rotar">⟳ Auto-rotar</button>
+    </div>
+    <div class="row" id="color-mode-row">
+      <label>Color</label>
+      <select id="color-mode">
+        <option value="vertex">Vertex colors</option>
+        <option value="single">Color único</option>
+        <option value="depth">Profundidad</option>
+        <option value="height">Altura (Y)</option>
+      </select>
+    </div>
+    <div class="row" id="point-size-row">
+      <label>Punto</label>
+      <input type="range" id="point-size" min="0.0005" max="0.05" step="0.0005" value="0.005" />
+    </div>
+    <div class="row" id="wireframe-row">
+      <label>Mesh</label>
+      <button class="tool-btn" id="wireframe-toggle">Wireframe</button>
+    </div>
   </div>
 </div>
 
@@ -112,11 +145,27 @@ const status = document.getElementById('status');
 const fpsEl = document.getElementById('fps');
 const flipBtn = document.getElementById('flip-y');
 const typeBadge = document.getElementById('type-badge');
+const toolsPanel = document.getElementById('tools');
 const pointSizeRow = document.getElementById('point-size-row');
 const pointSizeInput = document.getElementById('point-size');
+const wireframeRow = document.getElementById('wireframe-row');
+const wireframeBtn = document.getElementById('wireframe-toggle');
+const colorModeRow = document.getElementById('color-mode-row');
+const colorModeSel = document.getElementById('color-mode');
+const bgBtn = document.getElementById('bg-toggle');
+const autoRotateBtn = document.getElementById('autorotate');
+const viewResetBtn = document.getElementById('view-reset');
+const viewTopBtn = document.getElementById('view-top');
+const viewFrontBtn = document.getElementById('view-front');
+const viewRightBtn = document.getElementById('view-right');
+const viewIsoBtn = document.getElementById('view-iso');
 
 let lastFile = null;
 let flipY = false;
+let currentObject = null;
+let currentBounds = null;
+const BG_COLORS = [0x1a1a1a, 0xf2f2f2, 0x202840];
+let bgIndex = 0;
 
 // We swap between two render paths: a Gaussian Splats viewer (mkkellogg lib)
 // and a plain three.js scene for point clouds / meshes.
@@ -187,7 +236,12 @@ function disposeAll() {
   pcCamera = null;
   if (pcControls) { pcControls.dispose(); pcControls = null; }
   pcMaterial = null;
+  currentObject = null;
+  currentBounds = null;
   pointSizeRow.style.display = 'none';
+  wireframeRow.style.display = 'none';
+  colorModeRow.style.display = 'none';
+  toolsPanel.style.display = 'none';
   container.innerHTML = '';
 }
 
@@ -299,6 +353,7 @@ async function loadAsPlyGeometry(file, info) {
     });
     object = new THREE.Mesh(geometry, mat);
     pcMaterial = mat;
+    wireframeRow.style.display = 'flex';
     setBadge('mesh', '🟢 Mesh');
   } else {
     // Point cloud (LIDAR / photogrammetry)
@@ -316,12 +371,19 @@ async function loadAsPlyGeometry(file, info) {
 
   object.position.sub(center);
   pcScene.add(object);
+  currentObject = object;
 
   if (flipY) {
     object.rotation.x = Math.PI;
   }
 
+  // Show colorMode dropdown only for point clouds and meshes (not splats)
+  colorModeRow.style.display = 'flex';
+  // Reset colorMode default to "vertex" when geometry has color, else "single"
+  colorModeSel.value = info.hasColor ? 'vertex' : 'single';
+
   frameObject(object);
+  currentBounds = new THREE.Box3().setFromObject(object);
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -350,7 +412,7 @@ async function loadFile(file) {
     }
 
     dropZone.classList.add('hidden');
-    flipBtn.style.display = 'inline-block';
+    toolsPanel.style.display = 'block';
     const sizeMb = (file.size / 1024 / 1024).toFixed(2);
     setStatus(`✅ ${file.name} (${sizeMb} MB)`);
   } catch (err) {
@@ -392,7 +454,7 @@ fileInput.addEventListener('change', (e) => {
 flipBtn.addEventListener('click', () => {
   if (!lastFile) return;
   flipY = !flipY;
-  flipBtn.textContent = flipY ? '⇅ Flip Y (activo)' : '⇅ Flip Y';
+  flipBtn.classList.toggle('active', flipY);
   loadFile(lastFile);
 });
 
@@ -401,6 +463,95 @@ pointSizeInput.addEventListener('input', (e) => {
     pcMaterial.size = parseFloat(e.target.value);
   }
 });
+
+// ── Camera presets ───────────────────────────────────────────────────────
+function setView(direction) {
+  if (!pcCamera || !currentBounds) return;
+  const center = currentBounds.getCenter(new THREE.Vector3());
+  const size = currentBounds.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist = maxDim / (2 * Math.tan((pcCamera.fov * Math.PI / 180) / 2)) * 1.6;
+  const offsets = {
+    top:   new THREE.Vector3(0, dist, 0.0001),
+    front: new THREE.Vector3(0, 0, dist),
+    right: new THREE.Vector3(dist, 0, 0),
+    iso:   new THREE.Vector3(dist * 0.7, dist * 0.5, dist),
+    reset: new THREE.Vector3(dist * 0.7, dist * 0.5, dist),
+  };
+  pcCamera.position.copy(center).add(offsets[direction] || offsets.iso);
+  pcControls.target.copy(center);
+  pcControls.update();
+}
+
+viewResetBtn.addEventListener('click', () => setView('reset'));
+viewTopBtn.addEventListener('click', () => setView('top'));
+viewFrontBtn.addEventListener('click', () => setView('front'));
+viewRightBtn.addEventListener('click', () => setView('right'));
+viewIsoBtn.addEventListener('click', () => setView('iso'));
+
+// ── Background toggle ────────────────────────────────────────────────────
+bgBtn.addEventListener('click', () => {
+  bgIndex = (bgIndex + 1) % BG_COLORS.length;
+  if (pcScene) pcScene.background = new THREE.Color(BG_COLORS[bgIndex]);
+});
+
+// ── Auto-rotate ───────────────────────────────────────────────────────────
+autoRotateBtn.addEventListener('click', () => {
+  if (!pcControls) return;
+  pcControls.autoRotate = !pcControls.autoRotate;
+  pcControls.autoRotateSpeed = 1.5;
+  autoRotateBtn.classList.toggle('active', pcControls.autoRotate);
+});
+
+// ── Wireframe ─────────────────────────────────────────────────────────────
+wireframeBtn.addEventListener('click', () => {
+  if (!pcMaterial || pcMaterial.isPointsMaterial) return;
+  pcMaterial.wireframe = !pcMaterial.wireframe;
+  wireframeBtn.classList.toggle('active', pcMaterial.wireframe);
+});
+
+// ── Color modes ───────────────────────────────────────────────────────────
+function applyColorMode(mode) {
+  if (!currentObject || !currentObject.geometry) return;
+  const geom = currentObject.geometry;
+  const isPoints = pcMaterial.isPointsMaterial;
+  const positions = geom.attributes.position;
+  const count = positions.count;
+
+  switch (mode) {
+    case 'vertex': {
+      pcMaterial.vertexColors = !!geom.attributes.color;
+      pcMaterial.color.setHex(0xffffff);
+      break;
+    }
+    case 'single': {
+      pcMaterial.vertexColors = false;
+      pcMaterial.color.setHex(isPoints ? 0x88aaff : 0xb0b0b0);
+      break;
+    }
+    case 'depth':
+    case 'height': {
+      // Generate per-vertex colors and assign as a fresh attribute.
+      const colors = new Float32Array(count * 3);
+      const tmpBox = new THREE.Box3().setFromBufferAttribute(positions);
+      const min = tmpBox.min, max = tmpBox.max;
+      const axis = mode === 'height' ? 'y' : 'z';
+      const range = (max[axis] - min[axis]) || 1;
+      const c = new THREE.Color();
+      for (let i = 0; i < count; i++) {
+        const t = (positions.array[i * 3 + (axis === 'y' ? 1 : 2)] - min[axis]) / range;
+        c.setHSL(0.66 - t * 0.66, 0.85, 0.5); // blue→red
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }
+      geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      pcMaterial.vertexColors = true;
+      pcMaterial.color.setHex(0xffffff);
+      break;
+    }
+  }
+  pcMaterial.needsUpdate = true;
+}
+colorModeSel.addEventListener('change', (e) => applyColorMode(e.target.value));
 
 window.addEventListener('resize', () => {
   if (pcRenderer && pcCamera) {
