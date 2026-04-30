@@ -254,7 +254,7 @@ async function uploadFile(file) {
   try {
     const result = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/upload.php');
+      xhr.open('POST', './upload.php');
       xhr.setRequestHeader('X-Upload-Token', token);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) setProgress((e.loaded / e.total) * 100);

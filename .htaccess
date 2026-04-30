@@ -10,7 +10,7 @@ AddType application/wasm .wasm
 <IfModule mod_headers.c>
   <FilesMatch "\.(glb|gltf|hdr|exr|ktx2|bin)$">
     Header set Access-Control-Allow-Origin "*"
-    Header set Cache-Control "public, max-age=86400"
+    Header set Cache-Control "public, max-age=0, must-revalidate"
   </FilesMatch>
 
   # HTML y JS del visor: NO cachear (queremos deploys instantáneos)
