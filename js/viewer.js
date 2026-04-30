@@ -3,7 +3,7 @@ import {
   createRenderer, createScene, createCamera, createControls,
   getGLTFLoader, loadHDRI, setCustomHDRI, frameObject, countTriangles, enableShadows,
   fetchManifest, loadGLBWithStats, formatBytes,
-} from './scene.js';
+} from './scene.js?v=20260430';
 
 const host = document.getElementById('canvas-wrap');
 const $ = (id) => document.getElementById(id);

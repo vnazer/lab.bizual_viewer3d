@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js';
+import { sanitizeGLB } from './sanitize.js?v=20260430';
 
 const HDRI_URL = './hdri/wide_street_01_2k.hdr';
 const DRACO_DECODER = 'https://www.gstatic.com/draco/v1/decoders/';
