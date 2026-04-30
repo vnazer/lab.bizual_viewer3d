@@ -34,7 +34,13 @@
     border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer;
   }
   #file-button:hover { background: #ff8555; }
-  #status { position: fixed; bottom: 16px; left: 16px; font-size: 11px; opacity: 0.5; }
+  #status {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.85); padding: 10px 16px; border-radius: 8px;
+    font-size: 12px; max-width: 80vw; text-align: center;
+    border: 1px solid rgba(255,255,255,0.15); z-index: 200;
+  }
+  #status.error { background: rgba(180,40,40,0.9); border-color: rgba(255,100,100,0.5); }
   #fps { position: fixed; top: 16px; right: 16px; background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 8px; font-family: monospace; font-size: 12px; }
 </style>
 </head>
@@ -101,52 +107,64 @@ function updateFPS() {
 }
 updateFPS();
 
-async function loadSplat(file) {
-  status.textContent = `Cargando ${file.name}…`;
+function setStatus(msg, isError = false) {
+  status.textContent = msg;
+  status.classList.toggle('error', isError);
+  console.log('[splat]', msg);
+}
 
-  const url = URL.createObjectURL(file);
+async function loadSplat(file) {
+  setStatus(`Leyendo ${file.name}…`);
   const ext = file.name.split('.').pop().toLowerCase();
 
-  let format;
-  if (ext === 'spz') format = GaussianSplats3D.SceneFormat.Spz;
-  else if (ext === 'ply') format = GaussianSplats3D.SceneFormat.Ply;
-  else if (ext === 'splat') format = GaussianSplats3D.SceneFormat.Splat;
-  else if (ext === 'ksplat') format = GaussianSplats3D.SceneFormat.KSplat;
-  else {
-    status.textContent = `❌ Formato no soportado: .${ext}`;
+  const formatMap = {
+    spz: GaussianSplats3D.SceneFormat.Spz,
+    ply: GaussianSplats3D.SceneFormat.Ply,
+    splat: GaussianSplats3D.SceneFormat.Splat,
+    ksplat: GaussianSplats3D.SceneFormat.KSplat,
+  };
+  const format = formatMap[ext];
+  if (format === undefined) {
+    setStatus(`❌ Formato no soportado: .${ext}`, true);
     return;
   }
 
-  // Limpiar viewer anterior
   if (viewer) {
-    try { viewer.dispose(); } catch(e) {}
+    try { viewer.dispose(); } catch (e) { console.warn('[splat] dispose:', e); }
     viewer = null;
     container.innerHTML = '';
   }
 
-  viewer = new GaussianSplats3D.Viewer({
-    rootElement: container,
-    cameraUp: [0, -1, 0],          // Scaniverse exporta con Y invertido típicamente
-    initialCameraPosition: [0, 1, 3],
-    initialCameraLookAt: [0, 0, 0],
-    sphericalHarmonicsDegree: 2,
-    sceneRevealMode: GaussianSplats3D.SceneRevealMode.Gradual,
-    crossOrigin: 'anonymous',
-  });
-
+  let url;
   try {
-    await viewer.addSplatScene(url, {
-      format: format,
-      progressiveLoad: true,
-      onProgress: (p) => { status.textContent = `Cargando ${file.name}: ${Math.round(p)}%`; }
+    setStatus(`Preparando ${file.name}…`);
+    url = URL.createObjectURL(file);
+
+    viewer = new GaussianSplats3D.Viewer({
+      rootElement: container,
+      initialCameraPosition: [0, 1, 3],
+      initialCameraLookAt: [0, 0, 0],
+      sphericalHarmonicsDegree: 0,
+      sceneRevealMode: GaussianSplats3D.SceneRevealMode.Instant,
+      useBuiltInControls: true,
     });
+
+    setStatus(`Cargando ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`);
+    await viewer.addSplatScene(url, {
+      format,
+      progressiveLoad: false,
+      onProgress: (p) => { if (p > 0 && p < 100) setStatus(`Cargando ${file.name}: ${Math.round(p)}%`); }
+    });
+
     viewer.start();
     dropZone.classList.add('hidden');
-    status.textContent = `✅ ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) cargado`;
+    setStatus(`✅ ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
   } catch (err) {
-    status.textContent = `❌ Error cargando: ${err.message}`;
-    console.error(err);
+    console.error('[splat] load failed:', err);
+    setStatus(`❌ ${err?.message || err || 'Error desconocido'}`, true);
     dropZone.classList.remove('hidden');
+  } finally {
+    if (url) setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 }
 
