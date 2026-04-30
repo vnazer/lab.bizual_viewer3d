@@ -90,7 +90,7 @@ async function populate(models) {
       const opt = document.createElement('option');
       const url = typeof m === 'string' ? m : m.url || m.path;
       const label = (typeof m === 'string' ? m : (m.name || m.url || m.path)).split('/').pop();
-      opt.value = url.startsWith('/') ? url : '/models/' + url.replace(/^\.?\//, '');
+      opt.value = url;
       opt.textContent = label;
       s.select.appendChild(opt);
     });

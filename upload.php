@@ -118,6 +118,6 @@ if (!move_uploaded_file($file['tmp_name'], $dest)) {
 echo json_encode([
     'ok'   => true,
     'name' => $safeName,
-    'url'  => '/models/' . $safeName,
+    'url'  => 'models/' . $safeName,
     'size' => filesize($dest),
 ], JSON_UNESCAPED_SLASHES);

@@ -20,7 +20,7 @@ foreach ($it as $f) {
     if ($ext !== 'glb' && $ext !== 'gltf') continue;
     $files[] = [
         'name' => $f->getFilename(),
-        'url'  => '/models/' . $f->getFilename(),
+        'url'  => 'models/' . $f->getFilename(),
         'size' => $f->getSize(),
         'mtime'=> $f->getMTime(),
     ];

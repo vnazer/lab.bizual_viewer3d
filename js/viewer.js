@@ -45,7 +45,7 @@ async function populateModels() {
     const label = typeof m === 'string'
       ? m.split('/').pop()
       : (m.name || m.url || m.path).split('/').pop();
-    opt.value = url.startsWith('/') ? url : '/models/' + url.replace(/^\.?\//, '');
+    opt.value = url;
     opt.textContent = label;
     select.appendChild(opt);
   });

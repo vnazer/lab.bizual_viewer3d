@@ -197,7 +197,7 @@ export function enableShadows(root) {
 
 export async function fetchManifest() {
   // Try PHP endpoint first (Hostinger), fall back to manifest.json.
-  const tries = ['/models.php', '/models/manifest.json'];
+  const tries = ['./models.php', './models/manifest.json'];
   for (const url of tries) {
     try {
       const res = await fetch(url, { cache: 'no-store' });
