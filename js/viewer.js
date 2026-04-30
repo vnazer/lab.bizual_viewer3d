@@ -11,10 +11,17 @@ const $ = (id) => document.getElementById(id);
 const { renderer, backend } = await createRenderer(host);
 $('renderer-tag').textContent = backend.toUpperCase();
 
-const { scene, sun, contactShadows } = createScene();
+const { scene, sun, hemi, contactShadows } = createScene();
 const camera = createCamera(host);
 const controls = createControls(camera, renderer.domElement);
 const loader = getGLTFLoader(renderer);
+
+// Expose live instances for in-browser lighting debug from the console.
+// scene.js is a factory module so the actual singletons live here.
+window.__renderer = renderer;
+window.__scene = scene;
+window.__sunLight = sun;
+window.__ambientLight = hemi;
 
 let envTex = null;
 let currentModel = null;
