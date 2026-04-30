@@ -105,6 +105,16 @@
       <label>Mesh</label>
       <button class="tool-btn" id="wireframe-toggle">Wireframe</button>
     </div>
+    <div class="row">
+      <label>HDRI</label>
+      <button class="tool-btn" id="hdri-load">🌅 Cargar .hdr</button>
+      <button class="tool-btn" id="hdri-toggle" title="Activar/desactivar entorno">On</button>
+      <button class="tool-btn" id="hdri-clear" title="Quitar HDRI">Clear</button>
+      <input type="file" id="hdri-input" accept=".hdr" style="display:none;" />
+    </div>
+    <div class="row" id="hdri-name-row" style="opacity:0.7;font-size:11px;">
+      <span id="hdri-name">Sin HDRI cargado</span>
+    </div>
   </div>
 </div>
 
@@ -135,6 +145,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 
 const container = document.getElementById('canvas-container');
@@ -166,6 +177,12 @@ let currentObject = null;
 let currentBounds = null;
 const BG_COLORS = [0x1a1a1a, 0xf2f2f2, 0x202840];
 let bgIndex = 0;
+
+// HDRI state shared across loads. envTexture is renderer-bound so we rebuild
+// the PMREM env each time a new pcRenderer is created.
+let hdriRgbe = null;
+let hdriEnabled = false;
+let hdriEnvTex = null;
 
 // We swap between two render paths: a Gaussian Splats viewer (mkkellogg lib)
 // and a plain three.js scene for point clouds / meshes.
@@ -314,6 +331,27 @@ function startPlainScene() {
     pcRenderer.render(pcScene, pcCamera);
   };
   tick();
+
+  // If user already loaded an HDRI before this scene was created, reapply it.
+  if (hdriRgbe && hdriEnabled) applyHdriToPcScene();
+}
+
+function applyHdriToPcScene() {
+  if (!pcScene || !pcRenderer || !hdriRgbe) return;
+  if (!hdriEnvTex) {
+    const pmrem = new THREE.PMREMGenerator(pcRenderer);
+    pmrem.compileEquirectangularShader();
+    hdriEnvTex = pmrem.fromEquirectangular(hdriRgbe).texture;
+    pmrem.dispose();
+  }
+  pcScene.environment = hdriEnvTex;
+  pcScene.background = hdriEnvTex;
+}
+
+function clearHdriFromPcScene() {
+  if (!pcScene) return;
+  pcScene.environment = null;
+  pcScene.background = new THREE.Color(BG_COLORS[bgIndex]);
 }
 
 function frameObject(object) {
@@ -372,6 +410,11 @@ async function loadAsPlyGeometry(file, info) {
   object.position.sub(center);
   pcScene.add(object);
   currentObject = object;
+
+  // Backup original vertex colors so depth/height modes can be undone.
+  if (geometry.attributes.color) {
+    geometry.userData.originalColor = geometry.attributes.color.clone();
+  }
 
   if (flipY) {
     object.rotation.x = Math.PI;
@@ -520,6 +563,12 @@ function applyColorMode(mode) {
 
   switch (mode) {
     case 'vertex': {
+      // Restore the original color attribute if we previously replaced it.
+      if (geom.userData.originalColor) {
+        geom.setAttribute('color', geom.userData.originalColor.clone());
+      } else if (geom.attributes.color) {
+        geom.deleteAttribute('color');
+      }
       pcMaterial.vertexColors = !!geom.attributes.color;
       pcMaterial.color.setHex(0xffffff);
       break;
@@ -552,6 +601,65 @@ function applyColorMode(mode) {
   pcMaterial.needsUpdate = true;
 }
 colorModeSel.addEventListener('change', (e) => applyColorMode(e.target.value));
+
+// ── HDRI ──────────────────────────────────────────────────────────────────
+const hdriLoadBtn = document.getElementById('hdri-load');
+const hdriToggleBtn = document.getElementById('hdri-toggle');
+const hdriClearBtn = document.getElementById('hdri-clear');
+const hdriInput = document.getElementById('hdri-input');
+const hdriName = document.getElementById('hdri-name');
+
+hdriLoadBtn.addEventListener('click', () => hdriInput.click());
+
+hdriInput.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  hdriName.textContent = `Cargando ${file.name}…`;
+  const url = URL.createObjectURL(file);
+  new RGBELoader().load(
+    url,
+    (tex) => {
+      URL.revokeObjectURL(url);
+      hdriRgbe = tex;
+      // Invalidate any previously baked env so it rebuilds with the new HDRI.
+      if (hdriEnvTex) { hdriEnvTex.dispose(); hdriEnvTex = null; }
+      hdriEnabled = true;
+      hdriToggleBtn.classList.add('active');
+      hdriToggleBtn.textContent = 'On';
+      applyHdriToPcScene();
+      hdriName.textContent = `✓ ${file.name}`;
+    },
+    undefined,
+    (err) => {
+      URL.revokeObjectURL(url);
+      console.error('[hdri] failed:', err);
+      hdriName.textContent = `✗ Error cargando HDRI`;
+    }
+  );
+  e.target.value = '';
+});
+
+hdriToggleBtn.addEventListener('click', () => {
+  if (!hdriRgbe) {
+    hdriName.textContent = 'Primero cargá un .hdr';
+    return;
+  }
+  hdriEnabled = !hdriEnabled;
+  hdriToggleBtn.classList.toggle('active', hdriEnabled);
+  hdriToggleBtn.textContent = hdriEnabled ? 'On' : 'Off';
+  if (hdriEnabled) applyHdriToPcScene();
+  else clearHdriFromPcScene();
+});
+
+hdriClearBtn.addEventListener('click', () => {
+  if (hdriEnvTex) { hdriEnvTex.dispose(); hdriEnvTex = null; }
+  if (hdriRgbe) { hdriRgbe.dispose(); hdriRgbe = null; }
+  hdriEnabled = false;
+  hdriToggleBtn.classList.remove('active');
+  hdriToggleBtn.textContent = 'On';
+  clearHdriFromPcScene();
+  hdriName.textContent = 'Sin HDRI cargado';
+});
 
 window.addEventListener('resize', () => {
   if (pcRenderer && pcCamera) {

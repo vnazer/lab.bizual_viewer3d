@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {
   createRenderer, createScene, createCamera, createControls,
-  getGLTFLoader, loadHDRI, frameObject, countTriangles, enableShadows,
+  getGLTFLoader, loadHDRI, setCustomHDRI, frameObject, countTriangles, enableShadows,
   fetchManifest, loadGLBWithStats, formatBytes,
 } from './scene.js';
 
@@ -131,6 +131,27 @@ $('toggle-shadows').addEventListener('change', (e) => {
 $('toggle-rotate').addEventListener('change', (e) => {
   controls.autoRotate = e.target.checked;
   controls.autoRotateSpeed = 1.2;
+});
+
+// Custom HDRI upload
+$('btn-hdri').addEventListener('click', () => $('hdri-input').click());
+$('hdri-input').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  $('hdri-name').textContent = `Cargando ${file.name}…`;
+  try {
+    envTex = await setCustomHDRI(file, renderer);
+    if ($('toggle-hdri').checked) {
+      scene.environment = envTex;
+      scene.background = envTex;
+    }
+    $('hdri-name').textContent = `✓ ${file.name}`;
+  } catch (err) {
+    console.error('[hdri] failed:', err);
+    $('hdri-name').textContent = `✗ Error: ${err.message || err}`;
+  } finally {
+    e.target.value = '';
+  }
 });
 
 // Resize

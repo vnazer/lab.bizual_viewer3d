@@ -145,13 +145,42 @@ export function loadHDRI(renderer) {
         );
       })));
 
-  return rgbeP.then((tex) => {
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    pmrem.compileEquirectangularShader();
-    const env = pmrem.fromEquirectangular(tex).texture;
-    pmrem.dispose();
-    _envByRenderer.set(renderer, env);
-    return env;
+  return rgbeP.then((tex) => buildEnvForRenderer(renderer, tex));
+}
+
+function buildEnvForRenderer(renderer, rgbeTex) {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  const env = pmrem.fromEquirectangular(rgbeTex).texture;
+  pmrem.dispose();
+  _envByRenderer.set(renderer, env);
+  return env;
+}
+
+// Load a user-supplied .hdr from a File or URL and use it as the new HDRI.
+// Returns the env texture for `renderer` (PMREM-baked). Other renderers will
+// rebuild their PMREM next time loadHDRI(otherRenderer) is called.
+export function setCustomHDRI(input, renderer) {
+  return new Promise((resolve, reject) => {
+    const url = typeof input === 'string' ? input : URL.createObjectURL(input);
+    new RGBELoader().load(
+      url,
+      (tex) => {
+        if (typeof input !== 'string') URL.revokeObjectURL(url);
+        // Replace cached RGBE and invalidate every renderer's PMREM cache.
+        _rgbeTexture = tex;
+        _rgbePromise = null;
+        // WeakMap has no .clear(); we rebuild for the requesting renderer now,
+        // and other renderers will regenerate lazily on next loadHDRI call.
+        _envByRenderer.delete(renderer);
+        resolve(buildEnvForRenderer(renderer, tex));
+      },
+      undefined,
+      (err) => {
+        if (typeof input !== 'string') URL.revokeObjectURL(url);
+        reject(err);
+      }
+    );
   });
 }
 
