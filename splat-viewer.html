@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>Bizual Splat Viewer — Standalone</title>
+<title>Bizual 3D Capture Viewer</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a1a; font-family: -apple-system, system-ui, sans-serif; color: #fff; }
@@ -10,12 +10,27 @@
   #hud {
     position: fixed; top: 16px; left: 16px;
     background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
-    padding: 16px; border-radius: 12px; max-width: 320px;
+    padding: 16px; border-radius: 12px; max-width: 360px;
     border: 1px solid rgba(255,255,255,0.1);
   }
   #hud h1 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
   #hud p { font-size: 12px; opacity: 0.8; line-height: 1.4; }
   #hud code { background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-family: monospace; }
+  #type-badge {
+    display: none; margin-top: 12px; padding: 6px 10px;
+    border-radius: 6px; font-size: 11px; font-weight: 600;
+    border: 1px solid rgba(255,255,255,0.2);
+  }
+  #type-badge.splat   { background: rgba(170,80,255,0.2);  border-color: rgba(170,80,255,0.5);  color: #d4b3ff; }
+  #type-badge.lidar   { background: rgba(255,140,40,0.2);  border-color: rgba(255,140,40,0.5);  color: #ffcb8c; }
+  #type-badge.mesh    { background: rgba(80,200,120,0.2);  border-color: rgba(80,200,120,0.5);  color: #b3e6c2; }
+  #flip-y {
+    margin-top: 10px; background: rgba(255,255,255,0.1); color: #fff;
+    border: 1px solid rgba(255,255,255,0.2); padding: 6px 12px;
+    border-radius: 6px; cursor: pointer; font-size: 12px; display: none;
+  }
+  #point-size-row { display: none; margin-top: 10px; align-items: center; gap: 8px; font-size: 12px; }
+  #point-size-row input { flex: 1; }
   #drop-zone {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     background: rgba(0,0,0,0.85); backdrop-filter: blur(20px); z-index: 100;
@@ -49,18 +64,23 @@
 <div id="canvas-container"></div>
 
 <div id="hud">
-  <h1>🔮 Bizual Splat Viewer</h1>
-  <p>Visor standalone de Gaussian Splats. Acepta archivos <code>.spz</code>, <code>.ply</code> y <code>.splat</code>.</p>
-  <p style="margin-top: 8px;"><strong>Controles:</strong> click + drag para rotar, scroll para zoom, shift + drag para pan.</p>
-  <button id="flip-y" style="margin-top:12px;background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.2);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;display:none;">⇅ Flip Y (si no se ve)</button>
+  <h1>🌐 Bizual 3D Capture Viewer</h1>
+  <p>Detecta automáticamente y renderiza Gaussian Splats, point clouds (LIDAR / photogrammetry) y meshes. Acepta <code>.spz</code>, <code>.ply</code>, <code>.splat</code>, <code>.ksplat</code>.</p>
+  <p style="margin-top: 8px;"><strong>Controles:</strong> click + drag rota, scroll zoom, shift + drag pan.</p>
+  <div id="type-badge"></div>
+  <button id="flip-y">⇅ Flip Y</button>
+  <div id="point-size-row">
+    <span>Punto</span>
+    <input type="range" id="point-size" min="0.0005" max="0.05" step="0.0005" value="0.005" />
+  </div>
 </div>
 
 <div id="fps">— FPS</div>
 
 <div id="drop-zone">
   <div id="drop-zone-inner">
-    <h2>🔮 Cargar Splat</h2>
-    <p>Arrastrá un archivo <code>.spz</code>, <code>.ply</code> o <code>.splat</code> de Scaniverse, o seleccionalo desde tu Mac.</p>
+    <h2>🌐 Cargar captura 3D</h2>
+    <p>Arrastrá un archivo <code>.spz</code>, <code>.ply</code>, <code>.splat</code> o <code>.ksplat</code>. El visor detecta si es Gaussian Splat, LIDAR/point cloud o mesh.</p>
     <input type="file" id="file-input" accept=".spz,.ply,.splat,.ksplat">
     <button id="file-button">Seleccionar archivo</button>
   </div>
@@ -72,7 +92,7 @@
 {
   "imports": {
     "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/examples/jsm/controls/OrbitControls.js": "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
     "@mkkellogg/gaussian-splats-3d": "https://unpkg.com/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
   }
 }
@@ -80,7 +100,8 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 
 const container = document.getElementById('canvas-container');
@@ -90,59 +111,88 @@ const dropZone = document.getElementById('drop-zone');
 const status = document.getElementById('status');
 const fpsEl = document.getElementById('fps');
 const flipBtn = document.getElementById('flip-y');
+const typeBadge = document.getElementById('type-badge');
+const pointSizeRow = document.getElementById('point-size-row');
+const pointSizeInput = document.getElementById('point-size');
 
 let lastFile = null;
 let flipY = false;
 
-let viewer = null;
-let lastFrameTime = performance.now();
-let frameCount = 0;
-let fps = 0;
-
-function updateFPS() {
-  const now = performance.now();
-  frameCount++;
-  if (now - lastFrameTime >= 1000) {
-    fps = Math.round((frameCount * 1000) / (now - lastFrameTime));
-    fpsEl.textContent = fps + ' FPS';
-    frameCount = 0;
-    lastFrameTime = now;
-  }
-  requestAnimationFrame(updateFPS);
-}
-updateFPS();
+// We swap between two render paths: a Gaussian Splats viewer (mkkellogg lib)
+// and a plain three.js scene for point clouds / meshes.
+let splatViewer = null;
+let pcRenderer = null;
+let pcScene = null;
+let pcCamera = null;
+let pcControls = null;
+let pcAnimId = null;
+let pcMaterial = null;
 
 function setStatus(msg, isError = false) {
   status.textContent = msg;
   status.classList.toggle('error', isError);
-  console.log('[splat]', msg);
+  console.log('[viewer]', msg);
 }
 
-async function isGaussianSplatPly(file) {
-  // Read first 8KB to check the PLY header for splat-specific properties.
-  const head = await file.slice(0, 8192).text();
-  const sigs = ['f_dc_0', 'opacity', 'scale_0', 'rot_0'];
-  return sigs.every((s) => head.includes(s));
+function setBadge(kind, label) {
+  typeBadge.className = '';
+  if (!kind) { typeBadge.style.display = 'none'; return; }
+  typeBadge.classList.add(kind);
+  typeBadge.style.display = 'inline-block';
+  typeBadge.textContent = label;
 }
 
-async function loadSplat(file) {
-  lastFile = file;
-  setStatus(`Leyendo ${file.name}…`);
-  const ext = file.name.split('.').pop().toLowerCase();
+// ── PLY analysis ──────────────────────────────────────────────────────────
+// Reads the ASCII header (PLY always starts with an ASCII header even for binary)
+// and returns: { kind: 'splat' | 'pointcloud' | 'mesh', hasColor, vertices, faces }
+async function analyzePly(file) {
+  const head = await file.slice(0, 16384).text();
+  const splatSigs = ['f_dc_0', 'opacity', 'scale_0', 'rot_0'];
+  const isSplat = splatSigs.every((s) => head.includes(s));
+  const hasColor = /property\s+u?(?:char|int8)\s+(?:red|r)\b/i.test(head)
+                || /property\s+float\s+(?:red|r)\b/i.test(head);
+  const vMatch = head.match(/element\s+vertex\s+(\d+)/);
+  const fMatch = head.match(/element\s+face\s+(\d+)/);
+  const vertices = vMatch ? parseInt(vMatch[1], 10) : 0;
+  const faces = fMatch ? parseInt(fMatch[1], 10) : 0;
 
-  if (ext === 'ply') {
-    const isSplat = await isGaussianSplatPly(file);
-    if (!isSplat) {
-      setStatus(`❌ ${file.name} es un .ply normal (mesh/point cloud), no un Gaussian Splat. Scaniverse pre-2024 no exporta splats — usá la versión nueva o un .spz.`, true);
-      return;
-    }
+  let kind = 'pointcloud';
+  if (isSplat) kind = 'splat';
+  else if (faces > 0) kind = 'mesh';
+  return { kind, hasColor, vertices, faces };
+}
+
+// ── Cleanup ────────────────────────────────────────────────────────────────
+function disposeAll() {
+  if (splatViewer) {
+    try { splatViewer.dispose(); } catch (e) { console.warn(e); }
+    splatViewer = null;
   }
-  // Scaniverse exporta .ply con Y invertido. Default flip para .ply,
-  // estándar para .spz/.splat/.ksplat. El usuario puede invertir con el botón.
-  const defaultFlip = ext === 'ply';
-  const useFlip = flipY ? !defaultFlip : defaultFlip;
-  const cameraUp = useFlip ? [0, -1, 0] : [0, 1, 0];
+  if (pcAnimId) { cancelAnimationFrame(pcAnimId); pcAnimId = null; }
+  if (pcRenderer) {
+    pcRenderer.dispose();
+    if (pcRenderer.domElement.parentNode) pcRenderer.domElement.parentNode.removeChild(pcRenderer.domElement);
+    pcRenderer = null;
+  }
+  if (pcScene) {
+    pcScene.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach((m) => m.dispose());
+      }
+    });
+    pcScene = null;
+  }
+  pcCamera = null;
+  if (pcControls) { pcControls.dispose(); pcControls = null; }
+  pcMaterial = null;
+  pointSizeRow.style.display = 'none';
+  container.innerHTML = '';
+}
 
+// ── Gaussian Splat path (mkkellogg lib) ───────────────────────────────────
+async function loadAsSplat(file, ext) {
   const formatMap = {
     spz: GaussianSplats3D.SceneFormat.Spz,
     ply: GaussianSplats3D.SceneFormat.Ply,
@@ -150,23 +200,13 @@ async function loadSplat(file) {
     ksplat: GaussianSplats3D.SceneFormat.KSplat,
   };
   const format = formatMap[ext];
-  if (format === undefined) {
-    setStatus(`❌ Formato no soportado: .${ext}`, true);
-    return;
-  }
+  const defaultFlip = ext === 'ply'; // Scaniverse splat-PLYs come Y-flipped
+  const useFlip = flipY ? !defaultFlip : defaultFlip;
+  const cameraUp = useFlip ? [0, -1, 0] : [0, 1, 0];
 
-  if (viewer) {
-    try { viewer.dispose(); } catch (e) { console.warn('[splat] dispose:', e); }
-    viewer = null;
-    container.innerHTML = '';
-  }
-
-  let url;
+  const url = URL.createObjectURL(file);
   try {
-    setStatus(`Preparando ${file.name}…`);
-    url = URL.createObjectURL(file);
-
-    viewer = new GaussianSplats3D.Viewer({
+    splatViewer = new GaussianSplats3D.Viewer({
       rootElement: container,
       cameraUp,
       initialCameraPosition: [0, 1, 3],
@@ -176,48 +216,201 @@ async function loadSplat(file) {
       useBuiltInControls: true,
     });
 
-    setStatus(`Cargando ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`);
-    await viewer.addSplatScene(url, {
+    setStatus(`Cargando ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB) — Gaussian Splat…`);
+    await splatViewer.addSplatScene(url, {
       format,
       progressiveLoad: false,
-      onProgress: (p) => { if (p > 0 && p < 100) setStatus(`Cargando ${file.name}: ${Math.round(p)}%`); }
+      onProgress: (p) => { if (p > 0 && p < 100) setStatus(`Cargando: ${Math.round(p)}%`); }
     });
-
-    viewer.start();
-    dropZone.classList.add('hidden');
+    splatViewer.start();
+    setBadge('splat', '🟣 Gaussian Splat');
     flipBtn.style.display = 'inline-block';
-    setStatus(`✅ ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
-  } catch (err) {
-    console.error('[splat] load failed:', err);
-    setStatus(`❌ ${err?.message || err || 'Error desconocido'}`, true);
-    dropZone.classList.remove('hidden');
   } finally {
-    if (url) setTimeout(() => URL.revokeObjectURL(url), 60000);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 }
 
-// Drag & drop handlers
+// ── Point cloud / Mesh path (three.js) ────────────────────────────────────
+function startPlainScene() {
+  pcScene = new THREE.Scene();
+  pcScene.background = new THREE.Color(0x1a1a1a);
+
+  pcRenderer = new THREE.WebGLRenderer({ antialias: true });
+  pcRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  pcRenderer.setSize(container.clientWidth, container.clientHeight, false);
+  pcRenderer.outputColorSpace = THREE.SRGBColorSpace;
+  container.appendChild(pcRenderer.domElement);
+
+  pcCamera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.001, 10000);
+  pcCamera.position.set(0, 1, 3);
+
+  pcControls = new OrbitControls(pcCamera, pcRenderer.domElement);
+  pcControls.enableDamping = true;
+  pcControls.dampingFactor = 0.05;
+
+  // Soft lighting (used for mesh path)
+  pcScene.add(new THREE.AmbientLight(0xffffff, 0.4));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+  sun.position.set(5, 10, 5);
+  pcScene.add(sun);
+
+  const tick = () => {
+    pcAnimId = requestAnimationFrame(tick);
+    pcControls.update();
+    pcRenderer.render(pcScene, pcCamera);
+  };
+  tick();
+}
+
+function frameObject(object) {
+  const box = new THREE.Box3().setFromObject(object);
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist = maxDim / (2 * Math.tan((pcCamera.fov * Math.PI / 180) / 2)) * 1.6;
+  pcCamera.position.copy(center).add(new THREE.Vector3(dist * 0.7, dist * 0.5, dist));
+  pcCamera.near = Math.max(maxDim / 1000, 0.001);
+  pcCamera.far = maxDim * 100;
+  pcCamera.updateProjectionMatrix();
+  pcControls.target.copy(center);
+  pcControls.update();
+}
+
+async function loadAsPlyGeometry(file, info) {
+  startPlainScene();
+  setStatus(`Parseando ${file.name} (${info.vertices.toLocaleString()} vértices)…`);
+  const buf = await file.arrayBuffer();
+  const geometry = new PLYLoader().parse(buf);
+
+  // Center model so frameObject can position the camera reliably even when
+  // raw coordinates are huge (LIDAR scans often live far from origin).
+  geometry.computeBoundingBox();
+  const center = geometry.boundingBox.getCenter(new THREE.Vector3());
+
+  let object;
+  if (info.kind === 'mesh') {
+    geometry.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: info.hasColor ? 0xffffff : 0xb0b0b0,
+      vertexColors: info.hasColor,
+      side: THREE.DoubleSide,
+      flatShading: false,
+    });
+    object = new THREE.Mesh(geometry, mat);
+    pcMaterial = mat;
+    setBadge('mesh', '🟢 Mesh');
+  } else {
+    // Point cloud (LIDAR / photogrammetry)
+    const mat = new THREE.PointsMaterial({
+      size: 0.005,
+      vertexColors: info.hasColor,
+      color: info.hasColor ? 0xffffff : 0x88aaff,
+      sizeAttenuation: true,
+    });
+    object = new THREE.Points(geometry, mat);
+    pcMaterial = mat;
+    pointSizeRow.style.display = 'flex';
+    setBadge('lidar', '🟠 LIDAR / Point cloud');
+  }
+
+  object.position.sub(center);
+  pcScene.add(object);
+
+  if (flipY) {
+    object.rotation.x = Math.PI;
+  }
+
+  frameObject(object);
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────
+async function loadFile(file) {
+  lastFile = file;
+  setStatus(`Leyendo ${file.name}…`);
+  const ext = file.name.split('.').pop().toLowerCase();
+
+  if (!['spz', 'ply', 'splat', 'ksplat'].includes(ext)) {
+    setStatus(`❌ Formato no soportado: .${ext}`, true);
+    return;
+  }
+
+  disposeAll();
+
+  try {
+    let info = null;
+    if (ext === 'ply') info = await analyzePly(file);
+
+    if (ext !== 'ply' || info.kind === 'splat') {
+      // Splat path
+      await loadAsSplat(file, ext);
+    } else {
+      // Plain PLY (point cloud or mesh)
+      await loadAsPlyGeometry(file, info);
+    }
+
+    dropZone.classList.add('hidden');
+    flipBtn.style.display = 'inline-block';
+    const sizeMb = (file.size / 1024 / 1024).toFixed(2);
+    setStatus(`✅ ${file.name} (${sizeMb} MB)`);
+  } catch (err) {
+    console.error('[viewer] load failed:', err);
+    setStatus(`❌ ${err?.message || err || 'Error desconocido'}`, true);
+    dropZone.classList.remove('hidden');
+  }
+}
+
+// ── FPS counter ───────────────────────────────────────────────────────────
+let lastFrameTime = performance.now();
+let frameCount = 0;
+function tickFPS() {
+  const now = performance.now();
+  frameCount++;
+  if (now - lastFrameTime >= 1000) {
+    fpsEl.textContent = Math.round((frameCount * 1000) / (now - lastFrameTime)) + ' FPS';
+    frameCount = 0;
+    lastFrameTime = now;
+  }
+  requestAnimationFrame(tickFPS);
+}
+tickFPS();
+
+// ── UI events ─────────────────────────────────────────────────────────────
 ['dragover', 'dragenter'].forEach(evt => {
   document.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); });
 });
 document.addEventListener('drop', (e) => {
   e.preventDefault(); e.stopPropagation();
-  if (e.dataTransfer.files.length > 0) loadSplat(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length > 0) loadFile(e.dataTransfer.files[0]);
 });
 
 fileButton.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
-  if (e.target.files.length > 0) loadSplat(e.target.files[0]);
+  if (e.target.files.length > 0) loadFile(e.target.files[0]);
 });
 
 flipBtn.addEventListener('click', () => {
   if (!lastFile) return;
   flipY = !flipY;
-  flipBtn.textContent = flipY ? '⇅ Flip Y (activo)' : '⇅ Flip Y (si no se ve)';
-  loadSplat(lastFile);
+  flipBtn.textContent = flipY ? '⇅ Flip Y (activo)' : '⇅ Flip Y';
+  loadFile(lastFile);
 });
 
-console.log('Bizual Splat Viewer ready. Drop a .spz/.ply/.splat file or click to select.');
+pointSizeInput.addEventListener('input', (e) => {
+  if (pcMaterial && pcMaterial.isPointsMaterial) {
+    pcMaterial.size = parseFloat(e.target.value);
+  }
+});
+
+window.addEventListener('resize', () => {
+  if (pcRenderer && pcCamera) {
+    pcRenderer.setSize(container.clientWidth, container.clientHeight, false);
+    pcCamera.aspect = container.clientWidth / container.clientHeight;
+    pcCamera.updateProjectionMatrix();
+  }
+});
+
+console.log('Bizual 3D Capture Viewer ready.');
 </script>
 
 </body>
