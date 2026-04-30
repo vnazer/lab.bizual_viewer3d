@@ -268,7 +268,12 @@ async function uploadFile(file) {
           reject(new Error('Respuesta inválida del servidor'));
         }
       };
-      xhr.onerror = () => reject(new Error('Error de red'));
+      xhr.onerror = () => {
+        console.error('[upload] xhr error', { status: xhr.status, statusText: xhr.statusText, responseText: xhr.responseText });
+        reject(new Error(`Error de red (status ${xhr.status || '0'}). Mirá la consola.`));
+      };
+      xhr.ontimeout = () => reject(new Error('Timeout subiendo archivo'));
+      xhr.timeout = 120000;
       xhr.send(fd);
     });
 

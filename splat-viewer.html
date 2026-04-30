@@ -118,10 +118,25 @@ function setStatus(msg, isError = false) {
   console.log('[splat]', msg);
 }
 
+async function isGaussianSplatPly(file) {
+  // Read first 8KB to check the PLY header for splat-specific properties.
+  const head = await file.slice(0, 8192).text();
+  const sigs = ['f_dc_0', 'opacity', 'scale_0', 'rot_0'];
+  return sigs.every((s) => head.includes(s));
+}
+
 async function loadSplat(file) {
   lastFile = file;
   setStatus(`Leyendo ${file.name}…`);
   const ext = file.name.split('.').pop().toLowerCase();
+
+  if (ext === 'ply') {
+    const isSplat = await isGaussianSplatPly(file);
+    if (!isSplat) {
+      setStatus(`❌ ${file.name} es un .ply normal (mesh/point cloud), no un Gaussian Splat. Scaniverse pre-2024 no exporta splats — usá la versión nueva o un .spz.`, true);
+      return;
+    }
+  }
   // Scaniverse exporta .ply con Y invertido. Default flip para .ply,
   // estándar para .spz/.splat/.ksplat. El usuario puede invertir con el botón.
   const defaultFlip = ext === 'ply';
