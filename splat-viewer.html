@@ -52,6 +52,7 @@
   <h1>🔮 Bizual Splat Viewer</h1>
   <p>Visor standalone de Gaussian Splats. Acepta archivos <code>.spz</code>, <code>.ply</code> y <code>.splat</code>.</p>
   <p style="margin-top: 8px;"><strong>Controles:</strong> click + drag para rotar, scroll para zoom, shift + drag para pan.</p>
+  <button id="flip-y" style="margin-top:12px;background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.2);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;display:none;">⇅ Flip Y (si no se ve)</button>
 </div>
 
 <div id="fps">— FPS</div>
@@ -88,6 +89,10 @@ const fileButton = document.getElementById('file-button');
 const dropZone = document.getElementById('drop-zone');
 const status = document.getElementById('status');
 const fpsEl = document.getElementById('fps');
+const flipBtn = document.getElementById('flip-y');
+
+let lastFile = null;
+let flipY = false;
 
 let viewer = null;
 let lastFrameTime = performance.now();
@@ -114,8 +119,14 @@ function setStatus(msg, isError = false) {
 }
 
 async function loadSplat(file) {
+  lastFile = file;
   setStatus(`Leyendo ${file.name}…`);
   const ext = file.name.split('.').pop().toLowerCase();
+  // Scaniverse exporta .ply con Y invertido. Default flip para .ply,
+  // estándar para .spz/.splat/.ksplat. El usuario puede invertir con el botón.
+  const defaultFlip = ext === 'ply';
+  const useFlip = flipY ? !defaultFlip : defaultFlip;
+  const cameraUp = useFlip ? [0, -1, 0] : [0, 1, 0];
 
   const formatMap = {
     spz: GaussianSplats3D.SceneFormat.Spz,
@@ -142,6 +153,7 @@ async function loadSplat(file) {
 
     viewer = new GaussianSplats3D.Viewer({
       rootElement: container,
+      cameraUp,
       initialCameraPosition: [0, 1, 3],
       initialCameraLookAt: [0, 0, 0],
       sphericalHarmonicsDegree: 0,
@@ -158,6 +170,7 @@ async function loadSplat(file) {
 
     viewer.start();
     dropZone.classList.add('hidden');
+    flipBtn.style.display = 'inline-block';
     setStatus(`✅ ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
   } catch (err) {
     console.error('[splat] load failed:', err);
@@ -180,6 +193,13 @@ document.addEventListener('drop', (e) => {
 fileButton.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
   if (e.target.files.length > 0) loadSplat(e.target.files[0]);
+});
+
+flipBtn.addEventListener('click', () => {
+  if (!lastFile) return;
+  flipY = !flipY;
+  flipBtn.textContent = flipY ? '⇅ Flip Y (activo)' : '⇅ Flip Y (si no se ve)';
+  loadSplat(lastFile);
 });
 
 console.log('Bizual Splat Viewer ready. Drop a .spz/.ply/.splat file or click to select.');
