@@ -18,7 +18,6 @@ const panes = $$('.pane').map((el) => ({
   tris: el.querySelector('.tris'),
 }));
 
-let envTex = null;
 const states = [];
 
 async function setupPane(p) {
@@ -104,12 +103,15 @@ async function populate(models) {
 (async () => {
   for (const p of panes) await setupPane(p);
 
-  loadHDRI(states[0].renderer).then((env) => {
-    envTex = env;
-    if ($('#toggle-hdri').checked) {
-      states.forEach((s) => { s.scene.environment = env; s.scene.background = env; });
-    }
-  }).catch((e) => console.warn('[compare] HDRI failed:', e));
+  await Promise.all(states.map(async (s) => {
+    try {
+      s.envTex = await loadHDRI(s.renderer);
+      if ($('#toggle-hdri').checked) {
+        s.scene.environment = s.envTex;
+        s.scene.background = s.envTex;
+      }
+    } catch (e) { console.warn('[compare] HDRI failed:', e); }
+  }));
 
   const models = await fetchManifest();
   populate(models);
@@ -136,8 +138,8 @@ async function populate(models) {
 
   $('#toggle-hdri').addEventListener('change', (e) => {
     states.forEach((s) => {
-      s.scene.environment = e.target.checked ? envTex : null;
-      s.scene.background = e.target.checked ? envTex : null;
+      s.scene.environment = e.target.checked ? s.envTex : null;
+      s.scene.background = e.target.checked ? s.envTex : null;
     });
   });
   $('#toggle-shadows').addEventListener('change', (e) => {

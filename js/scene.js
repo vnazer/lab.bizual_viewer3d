@@ -124,28 +124,34 @@ export function getGLTFLoader(renderer) {
   return loader;
 }
 
-let _envTexture = null;
-let _envPromise = null;
+// PMREM env maps are tied to the GL context of the renderer that built them.
+// Cache the raw RGBE texture (renderer-agnostic) and produce one PMREM per renderer.
+let _rgbeTexture = null;
+let _rgbePromise = null;
+const _envByRenderer = new WeakMap();
 export function loadHDRI(renderer) {
-  if (_envTexture) return Promise.resolve(_envTexture);
-  if (_envPromise) return _envPromise;
-  _envPromise = new Promise((resolve, reject) => {
-    new RGBELoader().load(
-      HDRI_URL,
-      (tex) => {
-        const pmrem = new THREE.PMREMGenerator(renderer);
-        pmrem.compileEquirectangularShader();
-        const env = pmrem.fromEquirectangular(tex).texture;
-        tex.dispose();
-        pmrem.dispose();
-        _envTexture = env;
-        resolve(env);
-      },
-      undefined,
-      (err) => { _envPromise = null; reject(err); }
-    );
+  const cached = _envByRenderer.get(renderer);
+  if (cached) return Promise.resolve(cached);
+
+  const rgbeP = _rgbeTexture
+    ? Promise.resolve(_rgbeTexture)
+    : (_rgbePromise || (_rgbePromise = new Promise((resolve, reject) => {
+        new RGBELoader().load(
+          HDRI_URL,
+          (tex) => { _rgbeTexture = tex; resolve(tex); },
+          undefined,
+          (err) => { _rgbePromise = null; reject(err); }
+        );
+      })));
+
+  return rgbeP.then((tex) => {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+    const env = pmrem.fromEquirectangular(tex).texture;
+    pmrem.dispose();
+    _envByRenderer.set(renderer, env);
+    return env;
   });
-  return _envPromise;
 }
 
 // Frame model in view, return stats.
