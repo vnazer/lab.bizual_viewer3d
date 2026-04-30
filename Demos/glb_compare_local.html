@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Bizual GLB Compare — Local</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a1a; font-family: -apple-system, system-ui, sans-serif; color: #fff; }
+  #container { display: flex; width: 100vw; height: 100vh; }
+  .pane { flex: 1; position: relative; border-right: 1px solid #333; }
+  .pane:last-child { border-right: none; }
+  .label {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(0,0,0,0.8); padding: 12px 16px; border-radius: 8px;
+    font-size: 12px; line-height: 1.5; z-index: 10; backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .label h2 { font-size: 14px; margin-bottom: 8px; font-weight: 600; }
+  .label .stat { font-family: monospace; opacity: 0.85; }
+  .label .stat strong { color: #4ade80; }
+  .drop {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.6); cursor: pointer; transition: background 0.2s;
+  }
+  .drop:hover { background: rgba(0,0,0,0.8); }
+  .drop.has-file { display: none; }
+  .drop-inner { text-align: center; }
+  .drop-inner h3 { font-size: 18px; margin-bottom: 8px; opacity: 0.7; }
+  .drop-inner p { font-size: 12px; opacity: 0.5; }
+  canvas { display: block; }
+  #legend {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.8); padding: 12px 20px; border-radius: 8px;
+    font-size: 11px; opacity: 0.7; backdrop-filter: blur(10px);
+  }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <div class="pane" id="pane-a">
+    <div class="label" id="label-a"><h2>Pane A</h2><div class="stat">Sin archivo</div></div>
+    <div class="drop" id="drop-a">
+      <div class="drop-inner">
+        <h3>📦 Original</h3>
+        <p>Click o arrastrá <code>Dpto.glb</code></p>
+      </div>
+    </div>
+  </div>
+  <div class="pane" id="pane-b">
+    <div class="label" id="label-b"><h2>Pane B</h2><div class="stat">Sin archivo</div></div>
+    <div class="drop" id="drop-b">
+      <div class="drop-inner">
+        <h3>⚡ Optimizado</h3>
+        <p>Click o arrastrá <code>Dpto_optimized.glb</code></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="legend">🔄 Click + drag para rotar · scroll para zoom · cámaras sincronizadas</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { MeshoptDecoder } from 'https://unpkg.com/three@0.160.0/examples/jsm/libs/meshopt_decoder.module.js';
+
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+
+const HDRI_URL = 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_partly_cloudy_puresky_1k.hdr';
+
+class ComparePane {
+  constructor(paneId, labelId, dropId, title) {
+    this.pane = document.getElementById(paneId);
+    this.label = document.getElementById(labelId);
+    this.drop = document.getElementById(dropId);
+    this.title = title;
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x1a1a1a);
+
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+    this.camera.position.set(2, 2, 3);
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
+    this.pane.appendChild(this.renderer.domElement);
+
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.05;
+
+    // Lights
+    const ambient = new THREE.AmbientLight(0xffffff, 0.3);
+    this.scene.add(ambient);
+    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+    sun.position.set(5, 10, 5);
+    this.scene.add(sun);
+
+    // HDRI environment
+    new RGBELoader().load(HDRI_URL, (tex) => {
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      this.scene.environment = tex;
+    });
+
+    this.model = null;
+    this.fps = 0;
+    this.lastFrameTime = performance.now();
+    this.frameCount = 0;
+
+    this.setupDropZone();
+    this.resize();
+    this.animate();
+  }
+
+  setupDropZone() {
+    const onDrop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const files = e.dataTransfer ? e.dataTransfer.files : e.target.files;
+      if (files && files.length > 0) this.loadGLB(files[0]);
+    };
+
+    this.drop.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.glb,.gltf';
+      input.addEventListener('change', onDrop);
+      input.click();
+    });
+
+    ['dragover', 'dragenter'].forEach(evt => {
+      this.drop.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); });
+    });
+    this.drop.addEventListener('drop', onDrop);
+  }
+
+  async loadGLB(file) {
+    const start = performance.now();
+    const url = URL.createObjectURL(file);
+
+    if (this.model) {
+      this.scene.remove(this.model);
+      this.model.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+          if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+          else o.material.dispose();
+        }
+      });
+    }
+
+    const loader = new GLTFLoader();
+    loader.setDRACOLoader(dracoLoader);
+    loader.setMeshoptDecoder(MeshoptDecoder);
+
+    try {
+      const gltf = await loader.loadAsync(url);
+      const loadTime = performance.now() - start;
+
+      this.model = gltf.scene;
+      this.scene.add(this.model);
+
+      // Center and scale model
+      const box = new THREE.Box3().setFromObject(this.model);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const scale = 2 / maxDim;
+      this.model.scale.setScalar(scale);
+      this.model.position.sub(center.multiplyScalar(scale));
+
+      // Stats
+      let triangles = 0, materials = new Set(), textures = new Set();
+      this.model.traverse(o => {
+        if (o.isMesh) {
+          triangles += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3;
+          if (o.material) {
+            (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => {
+              materials.add(m.uuid);
+              ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap'].forEach(slot => {
+                if (m[slot]) textures.add(m[slot].uuid);
+              });
+            });
+          }
+        }
+      });
+
+      const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+      this.label.innerHTML = `
+        <h2>${this.title}</h2>
+        <div class="stat">📦 <strong>${file.name}</strong></div>
+        <div class="stat">💾 ${sizeMB} MB</div>
+        <div class="stat">⏱️ Carga: <strong>${loadTime.toFixed(0)}ms</strong></div>
+        <div class="stat">🔺 ${Math.round(triangles).toLocaleString()} triángulos</div>
+        <div class="stat">🎨 ${materials.size} materiales · ${textures.size} texturas</div>
+        <div class="stat">📊 FPS: <span id="${this.label.id}-fps">—</span></div>
+      `;
+      this.drop.classList.add('has-file');
+
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      this.label.innerHTML = `<h2>${this.title}</h2><div class="stat">❌ Error: ${err.message}</div>`;
+      console.error(err);
+    }
+  }
+
+  resize() {
+    const w = this.pane.clientWidth;
+    const h = this.pane.clientHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+
+  updateFPS() {
+    const now = performance.now();
+    this.frameCount++;
+    if (now - this.lastFrameTime >= 1000) {
+      this.fps = Math.round((this.frameCount * 1000) / (now - this.lastFrameTime));
+      const el = document.getElementById(`${this.label.id}-fps`);
+      if (el) el.textContent = this.fps;
+      this.frameCount = 0;
+      this.lastFrameTime = now;
+    }
+  }
+
+  animate() {
+    requestAnimationFrame(() => this.animate());
+    this.controls.update();
+    this.renderer.render(this.scene, this.camera);
+    this.updateFPS();
+  }
+}
+
+const paneA = new ComparePane('pane-a', 'label-a', 'drop-a', '📦 Original');
+const paneB = new ComparePane('pane-b', 'label-b', 'drop-b', '⚡ Optimizado');
+
+// Sync cameras
+let syncing = false;
+const syncFrom = (src, dst) => {
+  src.controls.addEventListener('change', () => {
+    if (syncing) return;
+    syncing = true;
+    dst.camera.position.copy(src.camera.position);
+    dst.controls.target.copy(src.controls.target);
+    dst.controls.update();
+    syncing = false;
+  });
+};
+syncFrom(paneA, paneB);
+syncFrom(paneB, paneA);
+
+window.addEventListener('resize', () => { paneA.resize(); paneB.resize(); });
+
+console.log('Bizual GLB Compare ready. Drop files in each pane.');
+</script>
+
+</body>
+</html>

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>lab.bizual.ai · 3D viewer</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="canvas-wrap"></div>
+
+  <aside id="hud">
+    <header>
+      <strong>lab.bizual.ai</strong>
+      <span id="renderer-tag">—</span>
+    </header>
+
+    <label class="row">
+      <span>Modelo</span>
+      <select id="model-select"><option value="">— cargando —</option></select>
+    </label>
+
+    <label class="row">
+      <span>URL externa</span>
+      <input id="external-url" type="text" placeholder="https://...glb" />
+      <button id="load-external">Cargar</button>
+    </label>
+
+    <div class="row">
+      <span>Subir GLB</span>
+      <button id="btn-upload">📤 Elegir archivo o arrastrar</button>
+      <small class="hint">Máx <strong>50 MB</strong> · .glb · .gltf · .ktx2 · .bin</small>
+      <input type="file" id="file-input" accept=".glb,.gltf,.ktx2,.bin" multiple style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" />
+    </div>
+
+    <label class="row checkbox">
+      <input type="checkbox" id="toggle-hdri" checked />
+      <span>HDRI environment</span>
+    </label>
+
+    <label class="row checkbox">
+      <input type="checkbox" id="toggle-shadows" checked />
+      <span>Contact shadows</span>
+    </label>
+
+    <label class="row checkbox">
+      <input type="checkbox" id="toggle-rotate" />
+      <span>Auto-rotate</span>
+    </label>
+
+    <div class="row stats">
+      <div><span class="k">FPS</span><span id="fps">0</span></div>
+      <div><span class="k">Tamaño</span><span id="filesize">—</span></div>
+      <div><span class="k">Carga</span><span id="loadtime">—</span></div>
+      <div><span class="k">Triángulos</span><span id="tris">—</span></div>
+      <div><span class="k">Draw calls</span><span id="drawcalls">—</span></div>
+    </div>
+
+    <footer>
+      <a href="/compare.html">↔ Comparar 2 modelos</a>
+    </footer>
+  </aside>
+
+  <div id="loading" class="hidden"><div class="spinner"></div><span>Cargando…</span></div>
+
+  <div id="drop-overlay" class="hidden">
+    <div class="drop-card">
+      <div class="drop-icon">📥</div>
+      <div class="drop-title">Soltar para subir</div>
+      <div class="drop-sub">Máx 50 MB · .glb · .gltf · .ktx2 · .bin</div>
+    </div>
+  </div>
+
+  <div id="upload-progress" class="hidden">
+    <div class="up-name"></div>
+    <div class="up-bar"><div class="up-fill"></div></div>
+    <div class="up-pct">0%</div>
+  </div>
+
+  <script type="module" src="/js/viewer.js?v=3"></script>
+</body>
+</html>

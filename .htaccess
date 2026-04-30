@@ -1,0 +1,61 @@
+# lab.bizual.ai — entorno de testing técnico de pipeline 3D
+
+# Tipos MIME para 3D
+AddType model/gltf-binary .glb
+AddType model/gltf+json .gltf
+AddType image/ktx2 .ktx2
+AddType application/wasm .wasm
+
+# CORS abierto para los assets (visor puede leer GLBs vía fetch)
+<IfModule mod_headers.c>
+  <FilesMatch "\.(glb|gltf|hdr|exr|ktx2|bin)$">
+    Header set Access-Control-Allow-Origin "*"
+    Header set Cache-Control "public, max-age=86400"
+  </FilesMatch>
+
+  # HTML y JS del visor: NO cachear (queremos deploys instantáneos)
+  <FilesMatch "\.(html|js|css|php)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </FilesMatch>
+</IfModule>
+
+# Compresión (los GLB con Draco/KTX2 ya vienen comprimidos, pero JS/HTML/JSON sí)
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json text/plain
+</IfModule>
+
+# Forzar HTTPS (Hostinger emite Let's Encrypt automáticamente)
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} off
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+
+# No listar el contenido de carpetas
+Options -Indexes
+
+# Página de inicio
+DirectoryIndex index.html
+
+# Permitir uploads (límite del visor: 50 MB)
+<IfModule mod_php.c>
+  php_value upload_max_filesize 50M
+  php_value post_max_size 55M
+  php_value max_execution_time 120
+  php_value max_input_time 120
+</IfModule>
+<IfModule mod_php8.c>
+  php_value upload_max_filesize 50M
+  php_value post_max_size 55M
+  php_value max_execution_time 120
+  php_value max_input_time 120
+</IfModule>
+
+# Bloquear acceso al upload.php desde browsers que NO sean del lab
+# (defensa adicional al token; opcional, sacar si rompe algo)
+# <Files "upload.php">
+#   SetEnvIfNoCase Referer "^https://lab\.bizual\.ai" allowed_referer
+#   Require env allowed_referer
+# </Files>

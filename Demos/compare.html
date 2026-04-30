@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>lab.bizual.ai · compare</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body class="compare-mode">
+  <div id="split">
+    <div class="pane" data-side="A">
+      <div class="canvas-host"></div>
+      <div class="pane-hud">
+        <strong>A</strong>
+        <select class="model-select"><option value="">—</option></select>
+        <span class="stats"><span class="filesize">—</span> · <span class="loadtime">—</span> · <span class="tris">—</span> tris</span>
+      </div>
+    </div>
+    <div class="pane" data-side="B">
+      <div class="canvas-host"></div>
+      <div class="pane-hud">
+        <strong>B</strong>
+        <select class="model-select"><option value="">—</option></select>
+        <span class="stats"><span class="filesize">—</span> · <span class="loadtime">—</span> · <span class="tris">—</span> tris</span>
+      </div>
+    </div>
+  </div>
+
+  <aside id="hud" class="compact">
+    <header>
+      <strong>compare</strong>
+      <a href="/">← volver</a>
+    </header>
+    <label class="row checkbox">
+      <input type="checkbox" id="sync-cameras" checked />
+      <span>Sincronizar cámaras</span>
+    </label>
+    <label class="row checkbox">
+      <input type="checkbox" id="toggle-hdri" checked />
+      <span>HDRI</span>
+    </label>
+    <label class="row checkbox">
+      <input type="checkbox" id="toggle-shadows" checked />
+      <span>Sombras</span>
+    </label>
+    <div class="row stats">
+      <div><span class="k">FPS</span><span id="fps">0</span></div>
+    </div>
+  </aside>
+
+  <script type="module" src="/js/compare.js"></script>
+</body>
+</html>
