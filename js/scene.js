@@ -226,17 +226,62 @@ export async function loadGLBWithStats(loader, url) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const blob = await res.blob();
   const bytes = blob.size;
-  const arrayBuffer = await blob.arrayBuffer();
+  let arrayBuffer = await blob.arrayBuffer();
+
+  // Some Blender exports leave texture entries with no `source` and no
+  // EXT_texture_webp/avif extension, which crashes GLTFLoader with a
+  // "cannot read 'uri' of undefined" deep in loadTexture. Patch on the fly.
+  arrayBuffer = sanitizeGLB(arrayBuffer) || arrayBuffer;
 
   return new Promise((resolve, reject) => {
-    // GLTFLoader.parse needs a base path for relative .bin/textures inside .gltf;
-    // for .glb everything is embedded so '' is fine.
     const base = url.substring(0, url.lastIndexOf('/') + 1);
     loader.parse(arrayBuffer, base, (gltf) => {
       const ms = performance.now() - t0;
       resolve({ gltf, bytes, ms });
     }, reject);
   });
+}
+
+function sanitizeGLB(buf) {
+  const view = new DataView(buf);
+  if (view.getUint32(0, true) !== 0x46546c67) return null; // not 'glTF'
+  const jsonLen = view.getUint32(12, true);
+  if (view.getUint32(16, true) !== 0x4e4f534a) return null; // not 'JSON'
+  const json = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, jsonLen)));
+
+  let touched = false;
+  for (const tex of json.textures || []) {
+    const ext = tex.extensions || {};
+    const hasExtSource = ext.EXT_texture_webp || ext.EXT_texture_avif;
+    if (tex.source === undefined && !hasExtSource && (json.images || []).length) {
+      tex.source = 0;
+      if (Object.keys(ext).length === 0) delete tex.extensions;
+      touched = true;
+    }
+  }
+  if (!touched) return null;
+
+  let newJson = new TextEncoder().encode(JSON.stringify(json));
+  const pad = (4 - (newJson.length % 4)) % 4;
+  if (pad) {
+    const padded = new Uint8Array(newJson.length + pad);
+    padded.set(newJson);
+    padded.fill(0x20, newJson.length); // pad with spaces
+    newJson = padded;
+  }
+  const rest = new Uint8Array(buf, 20 + jsonLen);
+  const total = 12 + 8 + newJson.length + rest.length;
+  const out = new ArrayBuffer(total);
+  const ov = new DataView(out);
+  ov.setUint32(0, 0x46546c67, true);
+  ov.setUint32(4, 2, true);
+  ov.setUint32(8, total, true);
+  ov.setUint32(12, newJson.length, true);
+  ov.setUint32(16, 0x4e4f534a, true);
+  new Uint8Array(out, 20).set(newJson);
+  new Uint8Array(out, 20 + newJson.length).set(rest);
+  console.warn('[lab] sanitized GLB: patched textures with missing source');
+  return out;
 }
 
 export function formatBytes(b) {
