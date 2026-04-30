@@ -59,7 +59,11 @@ async function populateModels() {
     opt.textContent = label;
     select.appendChild(opt);
   });
-  select.value = select.options[0].value;
+  const DEFAULT_MODEL = 'Edificio_01_vacio_sinplanters.glb';
+  const preferred = Array.from(select.options).find(
+    (o) => o.textContent === DEFAULT_MODEL || o.value.endsWith('/' + DEFAULT_MODEL)
+  );
+  select.value = preferred ? preferred.value : select.options[0].value;
   loadModel(select.value);
 }
 
