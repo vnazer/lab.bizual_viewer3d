@@ -278,14 +278,27 @@ export function parseWaypointJSON(text) {
   return list;
 }
 
-// Flexible normalizer: accepts 4 shapes and converts to the canonical form.
+// Convert a position-like value to a [x,y,z] array. Accepts:
+//   • [x, y, z]   → returned as-is
+//   • {x, y, z}   → converted (legacy export from older SaaS)
+//   • null/undef  → null
+function _toVec3(v) {
+  if (Array.isArray(v) && v.length >= 3) return [Number(v[0]), Number(v[1]), Number(v[2])];
+  if (v && typeof v === 'object' && 'x' in v && 'y' in v && 'z' in v) {
+    return [Number(v.x), Number(v.y), Number(v.z)];
+  }
+  return null;
+}
+
+// Flexible normalizer: accepts many shapes and converts to the canonical form.
 //   1. [...]                 → array of waypoints directly
 //   2. { waypoints: [...] }  → editor export (canonical)
 //   3. { rooms:     [...] }  → spec interior format with .camera
 //   4. { views:     [...] }  → spec exterior format with .camera
 //
 // Each item must end up with: { id, label?, icono?, position[3], target[3] }.
-// Items may use either { position, target } or { camera: { position, target } }.
+// Items may use { position, target } at top level OR nested in .camera.
+// position/target may be arrays [x,y,z] OR objects {x,y,z}.
 export function normalizeImportedWaypoints(raw) {
   let list;
   if (Array.isArray(raw)) list = raw;
@@ -296,21 +309,18 @@ export function normalizeImportedWaypoints(raw) {
 
   const out = list.map((w, i) => {
     const cam = w.camera || w;
-    const position = w.position || cam.position;
-    const target   = w.target   || cam.target;
-    if (!Array.isArray(position) || position.length < 3) {
-      throw new Error(`Waypoint #${i + 1}: falta position[3]`);
-    }
-    if (!Array.isArray(target) || target.length < 3) {
-      throw new Error(`Waypoint #${i + 1}: falta target[3]`);
-    }
+    const position = _toVec3(w.position) || _toVec3(cam.position);
+    const target   = _toVec3(w.target)   || _toVec3(cam.target);
+    if (!position) throw new Error(`Waypoint #${i + 1}: falta camera.position (acepta [x,y,z] o {x,y,z})`);
+    if (!target)   throw new Error(`Waypoint #${i + 1}: falta camera.target (acepta [x,y,z] o {x,y,z})`);
     if (!w.id && !w.label) throw new Error(`Waypoint #${i + 1}: falta id o label`);
     return {
-      id: w.id || (w.label || '').toLowerCase().replace(/\s+/g, '_'),
-      label: w.label || w.id,
-      icono: w.icono || w.icon || '•',
-      position: position.slice(0, 3).map(Number),
-      target: target.slice(0, 3).map(Number),
+      id: w.id || (w.label || `wp_${i}`).toLowerCase().replace(/\s+/g, '_'),
+      label: w.label || w.id || `Punto ${i + 1}`,
+      icono: w.icono || w.icon || '📍',
+      position,
+      target,
+      duration: Number(w.duration_ms || w.duration) || undefined,
     };
   });
   return out;

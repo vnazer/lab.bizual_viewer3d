@@ -7,10 +7,10 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260514';
-import { PostFX } from './postfx.js?v=20260514';
-import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260514';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260514';
+} from './scene.js?v=20260515';
+import { PostFX } from './postfx.js?v=20260515';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260515';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260515';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
@@ -18,8 +18,8 @@ import {
   formatWaypointJSON, parseWaypointJSON, normalizeImportedWaypoints,
   getWaypointSlots, guessModelTypeFromFilename,
   UNIT_WAYPOINT_SLOTS, EDIFICIO_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260514';
-import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260514';
+} from './waypoints.js?v=20260515';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260515';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -123,6 +123,8 @@ function setNavMode(mode, { fromUser = true } = {}) {
   navMode = mode;
   ls.set('navMode', mode);
   setUnitMode(mode);
+  // Sync floating-controls mode icon (defined later, may not exist yet).
+  try { if (typeof syncFloatingModeIcon === 'function') syncFloatingModeIcon(); } catch {}
   // Sync UI radios
   document.querySelectorAll('.nav-mode').forEach((el) => {
     el.classList.toggle('active', el.dataset.mode === mode);
@@ -217,6 +219,17 @@ function refreshWaypoints() {
   }
 }
 
+// True when a position falls inside the model's axis-aligned bbox — used
+// to flag waypoints whose camera lands "inside" the model (interior view).
+function _isInsideModelBBox(pos) {
+  if (!currentModel) return false;
+  const box = new THREE.Box3().setFromObject(currentModel);
+  if (box.isEmpty()) return false;
+  return pos[0] > box.min.x && pos[0] < box.max.x &&
+         pos[1] > box.min.y && pos[1] < box.max.y &&
+         pos[2] > box.min.z && pos[2] < box.max.z;
+}
+
 function renderViewGrid(elId, waypoints, onClick) {
   const el = $(elId);
   if (!el) return;
@@ -224,8 +237,10 @@ function renderViewGrid(elId, waypoints, onClick) {
   waypoints.forEach((w) => {
     const btn = document.createElement('button');
     btn.dataset.wpId = w.id;
-    btn.textContent = `${w.icono || '•'} ${w.label}`;
-    btn.title = w.label;
+    const inside = _isInsideModelBBox(w.position);
+    const insideMark = inside ? '<span class="wp-inside" title="Vista interior — la cámara entra al modelo">→Interior</span>' : '';
+    btn.innerHTML = `<span class="wp-label">${w.icono || '•'} ${escapeHtml(w.label)}</span>${insideMark}`;
+    btn.title = inside ? `${w.label} · click para ver desde adentro` : w.label;
     if (activeWaypointId === w.id) btn.classList.add('active');
     btn.addEventListener('click', () => onClick(w));
     el.appendChild(btn);
@@ -678,6 +693,32 @@ function renderMaterialsList() {
   });
 }
 
+// Extensions natively supported by THREE.GLTFLoader in r184. These get a ✓
+// even when declared as `extensionsRequired` because three.js will apply them.
+const NATIVELY_SUPPORTED_EXTENSIONS = new Set([
+  'KHR_draco_mesh_compression',
+  'KHR_lights_punctual',
+  'KHR_materials_anisotropy',
+  'KHR_materials_clearcoat',
+  'KHR_materials_dispersion',
+  'KHR_materials_emissive_strength',
+  'KHR_materials_ior',
+  'KHR_materials_iridescence',
+  'KHR_materials_pbrSpecularGlossiness',
+  'KHR_materials_sheen',
+  'KHR_materials_specular',
+  'KHR_materials_transmission',
+  'KHR_materials_unlit',
+  'KHR_materials_volume',
+  'KHR_mesh_quantization',
+  'KHR_texture_basisu',
+  'KHR_texture_transform',
+  'KHR_xmp_json_ld',
+  'EXT_meshopt_compression',
+  'EXT_texture_webp',
+  'EXT_texture_avif',
+]);
+
 function renderExtensions({ used, required }) {
   const container = $('extensions-list');
   const badge = $('ext-count');
@@ -689,15 +730,28 @@ function renderExtensions({ used, required }) {
     return;
   }
   const requiredSet = new Set(required);
-  const usedHtml = used
-    .map((e) => `<div class="ext-item${requiredSet.has(e) ? ' required' : ''}">${escapeHtml(e)}${requiredSet.has(e) ? ' <small>(required)</small>' : ''}</div>`)
-    .join('');
+  // ext-item with class:
+  //   .supported   → green ✓ (three.js applies it)
+  //   .required    → orange ! (declared required AND not natively supported)
+  //   (default)    → blue ✓ used but not required
+  const renderItem = (e) => {
+    const supported = NATIVELY_SUPPORTED_EXTENSIONS.has(e);
+    const isRequired = requiredSet.has(e);
+    const cls = supported ? 'supported' : (isRequired ? 'required' : '');
+    const tag = isRequired
+      ? (supported ? '<small>(required · soportado)</small>' : '<small>(required · NO soportado)</small>')
+      : '';
+    return `<div class="ext-item ${cls}">${escapeHtml(e)} ${tag}</div>`;
+  };
+  const usedHtml = used.map(renderItem).join('');
+  // Items required-but-not-in-used (rare but possible)
+  const orphanRequired = required.filter((e) => !used.includes(e));
   container.innerHTML = `
     <div class="group">
       <div class="group-title">Used (${used.length})</div>
       ${usedHtml}
     </div>
-    ${required.length ? `<div class="group"><div class="group-title">Required (${required.length})</div>${required.map((e) => `<div class="ext-item required">${escapeHtml(e)}</div>`).join('')}</div>` : ''}
+    ${orphanRequired.length ? `<div class="group"><div class="group-title">Required only (${orphanRequired.length})</div>${orphanRequired.map(renderItem).join('')}</div>` : ''}
   `;
 }
 
@@ -1871,6 +1925,69 @@ window.addEventListener('drop', (e) => {
   if (files && files.length) uploadFiles(files);
 });
 
+// ────────────────────────────────────────────────────────────────────
+// Floating viewport controls (bottom-right stack)
+// ────────────────────────────────────────────────────────────────────
+function zoomViewport(deltaUnits) {
+  if (cameraCtrl.isFlying()) cameraCtrl.cancel();
+  if (navMode === 'fps') return; // no zoom in fps mode (you walk instead)
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  camera.position.addScaledVector(dir, deltaUnits);
+  controls.update();
+}
+
+function resetCamera() {
+  if (!currentModel) return;
+  // Use the iso waypoint of the current model type as the reset target.
+  const list = activeModelType === 'edificio' ? buildingWaypoints : unitWaypoints;
+  const iso = list.find((w) => w.id === 'iso') || list.find((w) => w.id === 'vista_general') || list[0];
+  if (iso) goToWaypoint(iso);
+  else frameObject(currentModel, camera, controls);
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen?.();
+}
+
+function toggleNavMode() {
+  setNavMode(navMode === 'orbit' ? 'fps' : 'orbit');
+}
+
+function syncFloatingModeIcon() {
+  const btn = $('btn-cam-mode');
+  if (btn) btn.textContent = navMode === 'fps' ? '🚶' : '🌐';
+}
+
+$('btn-cam-reset')?.addEventListener('click', resetCamera);
+$('btn-cam-zoomin')?.addEventListener('click', () => zoomViewport(currentModel ? Math.max(1, _zoomStep()) : 1));
+$('btn-cam-zoomout')?.addEventListener('click', () => zoomViewport(currentModel ? -Math.max(1, _zoomStep()) : -1));
+$('btn-cam-fullscreen')?.addEventListener('click', toggleFullscreen);
+$('btn-cam-mode')?.addEventListener('click', () => { toggleNavMode(); syncFloatingModeIcon(); });
+
+// Step size scaled by model bbox so + / − feel right for both unit and building.
+function _zoomStep() {
+  if (!currentModel) return 1;
+  const box = new THREE.Box3().setFromObject(currentModel);
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  return Math.max(0.5, maxDim * 0.1); // ~10% of bbox per click
+}
+
+// Keyboard shortcuts (don't fire from inputs; respect existing E/I/R/Space handlers).
+window.addEventListener('keydown', (e) => {
+  const tag = (e.target?.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === '+' || e.key === '=') { zoomViewport(_zoomStep()); }
+  else if (e.key === '-' || e.key === '_') { zoomViewport(-_zoomStep()); }
+  else if (e.key === 'f' || e.key === 'F') { toggleFullscreen(); }
+  else if (e.key === 'Tab') { e.preventDefault(); toggleNavMode(); syncFloatingModeIcon(); }
+});
+
+syncFloatingModeIcon();
+
 // Atajo de teclado: Shift+T para resetear el token
 window.addEventListener('keydown', (e) => {
   if (e.shiftKey && e.key === 'T' && !e.ctrlKey && !e.metaKey) {
@@ -1904,6 +2021,11 @@ function closeModal() {
   pendingImportList = null;
   // Stop iframe load
   const iframe = $('map-iframe'); if (iframe) iframe.src = '';
+  // Tear down Mapbox map (frees WebGL context)
+  if (_mapboxHandle) {
+    try { _mapboxHandle.map.remove(); } catch {}
+    _mapboxHandle = null;
+  }
 }
 
 modalOverlay?.addEventListener('click', (e) => {
@@ -2027,6 +2149,100 @@ $('btn-show-map')?.addEventListener('click', () => {
   loadMapMode('satelite');
 });
 
-document.querySelectorAll('.map-modes .pill').forEach((btn) => {
+document.querySelectorAll('.map-modes .pill[data-map-mode]').forEach((btn) => {
   btn.addEventListener('click', () => loadMapMode(btn.dataset.mapMode));
+});
+
+// ── Mapbox real-environment modal ──────────────────────────────────
+const MAPBOX_TOKEN_KEY = 'bizual_lab_mapbox_token';
+let _mapboxHandle = null;
+
+function getMapboxToken() {
+  return localStorage.getItem(MAPBOX_TOKEN_KEY) || '';
+}
+
+function promptMapboxToken() {
+  const current = getMapboxToken();
+  const t = prompt(
+    'Pegá tu token público de Mapbox (pk.eyJ1...).\n' +
+    'Obtené uno gratis en mapbox.com → Account → Tokens.',
+    current || ''
+  );
+  if (t == null) return null;
+  const trimmed = t.trim();
+  if (!trimmed) {
+    localStorage.removeItem(MAPBOX_TOKEN_KEY);
+    return '';
+  }
+  localStorage.setItem(MAPBOX_TOKEN_KEY, trimmed);
+  return trimmed;
+}
+
+async function openMapboxEnv() {
+  const addr = (addressInput?.value || '').trim();
+  if (!addr) {
+    addressInput?.focus();
+    return;
+  }
+  let token = getMapboxToken();
+  if (!token) {
+    token = promptMapboxToken();
+    if (!token) return;
+  }
+  if (!currentModelUrl) {
+    alert('Cargá un GLB primero — el modelo se va a posicionar en el entorno real.');
+    return;
+  }
+  $('mapbox-address').textContent = addr;
+  openModal($('modal-mapbox'));
+
+  // Lazy-load mapbox module on first use.
+  try {
+    const mod = await import('./mapbox-env.js?v=20260515');
+    _mapboxHandle = await mod.openEnvironment({
+      container: $('mapbox-container'),
+      address: addr,
+      modelUrl: currentModelUrl,
+      token,
+    });
+  } catch (err) {
+    console.error('[mapbox-env] open failed:', err);
+    $('mapbox-container').innerHTML = `<div style="padding:20px;color:#f88;font-size:13px;">Error: ${err.message}</div>`;
+  }
+}
+
+$('btn-show-mapbox')?.addEventListener('click', openMapboxEnv);
+
+document.querySelectorAll('[data-mapbox-style]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-mapbox-style]').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    _mapboxHandle?.setStyle(btn.dataset.mapboxStyle);
+  });
+});
+
+const mbBearing = $('mapbox-bearing');
+const mbScale   = $('mapbox-scale');
+const mbAlt     = $('mapbox-altitude');
+mbBearing?.addEventListener('input', (e) => {
+  const v = parseFloat(e.target.value);
+  $('mapbox-bearing-val').textContent = `${v|0}°`;
+  _mapboxHandle?.setBearing(v);
+});
+mbScale?.addEventListener('input', (e) => {
+  const v = parseFloat(e.target.value);
+  $('mapbox-scale-val').textContent = v.toFixed(2);
+  _mapboxHandle?.setScale(v);
+});
+mbAlt?.addEventListener('input', (e) => {
+  const v = parseFloat(e.target.value);
+  $('mapbox-altitude-val').textContent = `${v} m`;
+  _mapboxHandle?.setAltitude(v);
+});
+
+$('mapbox-set-token')?.addEventListener('click', () => {
+  promptMapboxToken();
+  // Re-open to pick up the new token.
+  closeModal();
+  setTimeout(openMapboxEnv, 200);
 });
