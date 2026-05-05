@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260506';
+import { sanitizeGLB } from './sanitize.js?v=20260507';
 
 // ────────────────────────────────────────────────────────────────────
 // HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.
@@ -312,8 +312,12 @@ const TEX_SLOTS = [
   'anisotropyMap', 'iridescenceMap', 'iridescenceThicknessMap',
 ];
 
-export function applyAnisotropy(root, renderer) {
-  const max = renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+// Apply anisotropy. If `value` is omitted, uses the renderer's max capability.
+// Pass an explicit value (1, 4, 8, 16, ...) to compare quality/perf tradeoffs.
+// Capped to renderer.capabilities.getMaxAnisotropy() so we never exceed HW.
+export function applyAnisotropy(root, renderer, value) {
+  const cap = renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+  const target = Math.max(1, Math.min(cap, value == null ? cap : value));
   let applied = 0;
   root.traverse((o) => {
     if (!o.isMesh || !o.material) return;
@@ -321,15 +325,15 @@ export function applyAnisotropy(root, renderer) {
     mats.forEach((m) => {
       TEX_SLOTS.forEach((slot) => {
         const tex = m[slot];
-        if (tex && typeof tex === 'object' && tex.anisotropy !== undefined && tex.anisotropy !== max) {
-          tex.anisotropy = max;
+        if (tex && typeof tex === 'object' && tex.anisotropy !== undefined && tex.anisotropy !== target) {
+          tex.anisotropy = target;
           tex.needsUpdate = true;
           applied++;
         }
       });
     });
   });
-  return { max, slotsTouched: applied };
+  return { max: cap, applied: target, slotsTouched: applied };
 }
 
 // Extract material info for the inspector panel.

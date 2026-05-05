@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260506" />
+  <link rel="stylesheet" href="./css/style.css?v=20260507" />
   <script type="importmap">
   {
     "imports": {
@@ -164,6 +164,15 @@
         <input type="range" id="env-intensity" min="0.0" max="2.0" step="0.05" value="1.0" />
         <output id="env-intensity-val">1.00</output>
       </label>
+      <label class="row">
+        <span>Anisotropy</span>
+        <select id="aniso-select">
+          <option value="1">1× (sin filtrar)</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+          <option value="16" selected>16× (default)</option>
+        </select>
+      </label>
       <label class="row checkbox">
         <input type="checkbox" id="toggle-shadows" checked />
         <span>Contact shadows</span>
@@ -232,6 +241,6 @@
     <div class="up-pct">0%</div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260506"></script>
+  <script type="module" src="./js/viewer.js?v=20260507"></script>
 </body>
 </html>

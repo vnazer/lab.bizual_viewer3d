@@ -6,14 +6,14 @@ import {
   HDRI_PRESETS, DEFAULT_HDRI_ID,
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260506';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260506';
+} from './scene.js?v=20260507';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260507';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
   loadWaypointsForFile, saveWaypointsForFile, clearWaypointsForFile,
   formatWaypointJSON, parseWaypointJSON, UNIT_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260506';
+} from './waypoints.js?v=20260507';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -257,7 +257,30 @@ window.__envIntensity = persistedEnvIntensity;
 // Show max anisotropy capability up front.
 const maxAniso = renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
 const anisoEl = $('aniso-max');
-if (anisoEl) anisoEl.textContent = `${maxAniso}×`;
+function updateAnisoMaxLabel() {
+  if (anisoEl) anisoEl.textContent = `${anisoValue}× / max ${maxAniso}×`;
+}
+
+// User-selected anisotropy. Persisted. Capped at hw max.
+let anisoValue = Math.min(maxAniso, ls.get('aniso', 16));
+const anisoSelect = $('aniso-select');
+if (anisoSelect) {
+  anisoSelect.value = String(anisoValue);
+  anisoSelect.addEventListener('change', (e) => {
+    anisoValue = Math.min(maxAniso, parseInt(e.target.value, 10) || 16);
+    ls.set('aniso', anisoValue);
+    if (currentModel) {
+      const r = applyAnisotropy(currentModel, renderer, anisoValue);
+      // Re-run VRAM calc so the operator can see the (lack of) change in real time.
+      const vram = calculateVRAM(currentModel);
+      $('tex-count').textContent = vram.count.toString();
+      $('vram').textContent = formatBytes(vram.bytes);
+      console.log(`[lab] anisotropy → ${r.applied}× (${r.slotsTouched} texture slots updated)`);
+    }
+    updateAnisoMaxLabel();
+  });
+}
+updateAnisoMaxLabel();
 
 // Populate HDRI preset dropdown from scene.js export.
 const hdriSelect = $('hdri-preset');
@@ -359,7 +382,7 @@ async function loadModel(url) {
     const { gltf, bytes, ms } = await loadGLBWithStats(loader, url);
     const root = gltf.scene || gltf.scenes[0];
     enableShadows(root);
-    applyAnisotropy(root, renderer);
+    applyAnisotropy(root, renderer, anisoValue);
     const bvh = setupBVH(root);
     scene.add(root);
     currentModel = root;
