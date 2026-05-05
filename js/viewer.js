@@ -7,10 +7,10 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260513';
-import { PostFX } from './postfx.js?v=20260513';
-import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260513';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260513';
+} from './scene.js?v=20260514';
+import { PostFX } from './postfx.js?v=20260514';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260514';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260514';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
@@ -18,8 +18,8 @@ import {
   formatWaypointJSON, parseWaypointJSON, normalizeImportedWaypoints,
   getWaypointSlots, guessModelTypeFromFilename,
   UNIT_WAYPOINT_SLOTS, EDIFICIO_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260513';
-import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260513';
+} from './waypoints.js?v=20260514';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260514';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -852,6 +852,181 @@ if (sunElEl) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Hour-of-day → sun simulation (Chile / hemisferio sur, ~lat -33°, equinoccio).
+// One-way binding: hour drives sun. Manual sliders coexist (clear hour mode
+// when touched), so the UI stays consistent.
+// ────────────────────────────────────────────────────────────────────
+// [hour, azimut°, elev°, sunIntensity, envIntensity, sunColorHex]
+const SUN_SCHEDULE = [
+  [ 0,    0,  -35, 0.00, 0.04, '#111133'],
+  [ 5,   68,   -8, 0.00, 0.07, '#221133'],
+  [ 6,   80,    3, 0.50, 0.25, '#ff7722'],
+  [ 7,   95,   16, 0.85, 0.50, '#ffaa55'],
+  [ 8,  112,   30, 1.05, 0.72, '#ffd080'],
+  [ 9,  130,   43, 1.20, 0.88, '#fff0c0'],
+  [10,  150,   53, 1.30, 0.97, '#ffffff'],
+  [11,  167,   59, 1.30, 1.05, '#ffffff'],
+  [12,  180,   62, 1.25, 1.10, '#ffffff'],
+  [13,  193,   59, 1.25, 1.05, '#ffffff'],
+  [14,  212,   53, 1.20, 0.97, '#fff8ee'],
+  [15,  230,   43, 1.10, 0.88, '#ffe8c0'],
+  [16,  248,   30, 0.95, 0.72, '#ffcc80'],
+  [17,  264,   16, 0.75, 0.50, '#ff9944'],
+  [18,  278,    3, 0.45, 0.25, '#ff5511'],
+  [19,  288,   -8, 0.00, 0.08, '#221133'],
+  [20,  300,  -20, 0.00, 0.05, '#111133'],
+  [24,  360,  -35, 0.00, 0.04, '#111133'],
+];
+
+function _expandHex(h) {
+  h = h.replace('#', '');
+  return h.length === 3 ? `${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}` : h;
+}
+function _lerpHexColor(hex1, hex2, t) {
+  const a = _expandHex(hex1), b = _expandHex(hex2);
+  const r1 = parseInt(a.slice(0, 2), 16), g1 = parseInt(a.slice(2, 4), 16), b1 = parseInt(a.slice(4, 6), 16);
+  const r2 = parseInt(b.slice(0, 2), 16), g2 = parseInt(b.slice(2, 4), 16), b2_ = parseInt(b.slice(4, 6), 16);
+  return ((Math.round(r1 + (r2 - r1) * t) << 16) | (Math.round(g1 + (g2 - g1) * t) << 8) | Math.round(b1 + (b2_ - b1) * t));
+}
+
+function getSunParams(hour) {
+  const h = ((hour % 24) + 24) % 24;
+  let lo = SUN_SCHEDULE[0];
+  let hi = SUN_SCHEDULE[SUN_SCHEDULE.length - 1];
+  for (let i = 0; i < SUN_SCHEDULE.length - 1; i++) {
+    if (SUN_SCHEDULE[i][0] <= h && h < SUN_SCHEDULE[i + 1][0]) {
+      lo = SUN_SCHEDULE[i]; hi = SUN_SCHEDULE[i + 1]; break;
+    }
+  }
+  const span = hi[0] - lo[0];
+  const t = span === 0 ? 0 : (h - lo[0]) / span;
+  const lerp = (a, b) => a + (b - a) * t;
+  const elevation = lerp(lo[2], hi[2]);
+  return {
+    azimut:       lerp(lo[1], hi[1]),
+    elevation,
+    sunIntensity: Math.max(0, lerp(lo[3], hi[3])),
+    envIntensity: lerp(lo[4], hi[4]),
+    sunColor:     _lerpHexColor(lo[5], hi[5], t),
+    isNight:      elevation <= 0,
+    isGoldenHour: (h >= 5.5 && h <= 7.5) || (h >= 17 && h <= 19),
+  };
+}
+
+function _setSliderQuiet(el, valueText, value) {
+  if (!el) return;
+  if (value !== undefined) el.value = value;
+  // Also update the linked <output> if it's the next sibling-ish.
+  const out = el.parentElement?.querySelector('output');
+  if (out && valueText !== undefined) out.textContent = valueText;
+}
+
+function applySunHour(hour) {
+  const p = getSunParams(hour);
+
+  // Sun direction + intensity + color + visibility
+  const v = window.__visualState?.sun;
+  if (v) {
+    v.azimut = p.azimut;
+    v.elevation = p.elevation;
+    v.intensity = p.sunIntensity;
+    v.on = !p.isNight;
+  }
+  setSunDirection(sun, p.azimut, p.elevation, 30);
+  sun.intensity = p.sunIntensity;
+  sun.color.setHex(p.sunColor);
+  sun.visible = !p.isNight;
+
+  // HDRI environment intensity follows the sky brightness curve.
+  scene.environmentIntensity = p.envIntensity;
+  window.__envIntensity = p.envIntensity;
+
+  // Ambient color shifts with time of day (cool at night, warm at golden hour).
+  if (ambient) {
+    if (p.isNight) {
+      ambient.color.setHex(0x223355); ambient.intensity = 0.08;
+    } else if (p.isGoldenHour) {
+      ambient.color.setHex(0xff8833); ambient.intensity = 0.12;
+    } else {
+      ambient.color.setHex(0xc8d8e0); ambient.intensity = 0.15;
+    }
+  }
+
+  // Mirror the per-component sliders WITHOUT firing input events.
+  _setSliderQuiet(sunOnEl,    undefined, undefined);
+  if (sunOnEl)   sunOnEl.checked = !p.isNight;
+  _setSliderQuiet(sunIntEl,   p.sunIntensity.toFixed(2), p.sunIntensity);
+  _setSliderQuiet(sunAzEl,    `${p.azimut|0}°`,           p.azimut);
+  _setSliderQuiet(sunElEl,    `${p.elevation|0}°`,        p.elevation);
+  _setSliderQuiet(envSlider,  p.envIntensity.toFixed(2),  p.envIntensity);
+
+  ls.set('sun_hour', hour);
+  ls.set('sun_hour_active', true);
+}
+
+function updateSunHourDisplay(hour) {
+  const display = $('sun-hour-display');
+  if (!display) return;
+  const h = Math.floor(hour);
+  const m = Math.round((hour % 1) * 60);
+  display.textContent = `${String(h).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+// Hour slider events
+const hourSlider = $('sun-hour-slider');
+if (hourSlider) {
+  const initialHour = ls.get('sun_hour', 12);
+  hourSlider.value = initialHour;
+  updateSunHourDisplay(initialHour);
+  // Apply only if user has been using hour mode (otherwise respect their manual sliders).
+  if (ls.get('sun_hour_active', false)) applySunHour(initialHour);
+  hourSlider.addEventListener('input', (e) => {
+    if (sunAnimFrame) toggleSunAnimation(); // stop anim if user grabs the slider
+    const h = parseFloat(e.target.value);
+    updateSunHourDisplay(h);
+    applySunHour(h);
+  });
+}
+
+// When the user manually moves az/el/int sliders, exit hour mode so refresh
+// won't override their manual settings.
+[sunIntEl, sunAzEl, sunElEl].forEach((el) => {
+  el?.addEventListener('input', () => ls.set('sun_hour_active', false));
+});
+
+// Animation loop: full day in ~19 s (1 hour every 800 ms).
+let sunAnimFrame = null;
+let sunAnimHour = 5;
+
+function toggleSunAnimation() {
+  const btn = $('sun-animate-btn');
+  if (sunAnimFrame) {
+    cancelAnimationFrame(sunAnimFrame);
+    sunAnimFrame = null;
+    if (btn) { btn.textContent = '▶ Animar día'; btn.classList.remove('playing'); }
+    return;
+  }
+  if (!btn || !hourSlider) return;
+  const HOURS_PER_MS = 1 / 800;
+  let lastT = null;
+  btn.textContent = '⏸ Pausar';
+  btn.classList.add('playing');
+  sunAnimHour = parseFloat(hourSlider.value) || 5;
+  function tick(ts) {
+    if (lastT === null) lastT = ts;
+    const dt = ts - lastT;
+    lastT = ts;
+    sunAnimHour = (sunAnimHour + dt * HOURS_PER_MS) % 24;
+    hourSlider.value = sunAnimHour;
+    updateSunHourDisplay(sunAnimHour);
+    applySunHour(sunAnimHour);
+    sunAnimFrame = requestAnimationFrame(tick);
+  }
+  sunAnimFrame = requestAnimationFrame(tick);
+}
+$('sun-animate-btn')?.addEventListener('click', toggleSunAnimation);
+
+// ────────────────────────────────────────────────────────────────────
 // VISUAL panel: presets + SSAO + Bloom + Contrast
 // ────────────────────────────────────────────────────────────────────
 const ssaoOnEl    = $('ssao-on');
@@ -1139,6 +1314,15 @@ function autoCalibrate() {
   if (expoSlider) { expoSlider.value = exposure; if (expoOut) expoOut.textContent = exposure.toFixed(2); }
   if (envSlider)  { envSlider.value  = envIntensity; if (envOut) envOut.textContent  = envIntensity.toFixed(2); }
   if (tonemapSel) tonemapSel.value = tone;
+
+  // Respect hour mode: if the user has been driving the sun via the hour slider,
+  // apply the current hour LAST so its sun position/color override the heuristic.
+  if (ls.get('sun_hour_active', false)) {
+    const hour = ls.get('sun_hour', 12);
+    if (hourSlider) hourSlider.value = hour;
+    updateSunHourDisplay(hour);
+    applySunHour(hour);
+  }
 
   const ms = (performance.now() - t0).toFixed(0);
   const tone_label = albedo > 0.75 ? 'blanco' : albedo < 0.35 ? 'oscuro' : 'mixto';

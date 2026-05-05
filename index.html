@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260513" />
+  <link rel="stylesheet" href="./css/style.css?v=20260514" />
   <script type="importmap">
   {
     "imports": {
@@ -196,6 +196,23 @@
       </label>
 
       <div class="row label-only"><span>Luz solar</span></div>
+      <div class="sun-hour-section">
+        <div class="sun-hour-label">
+          <span>HORA DEL DÍA</span>
+          <span id="sun-hour-display" class="sun-hour-value">12:00</span>
+        </div>
+        <div class="sun-hour-gradient-track">
+          <input type="range" id="sun-hour-slider" min="0" max="24" step="0.25" value="12" class="sun-hour-range" />
+          <div class="sun-hour-markers">
+            <span>🌙 0</span>
+            <span>🌅 6</span>
+            <span>🌞 12</span>
+            <span>🌅 18</span>
+            <span>🌙 24</span>
+          </div>
+        </div>
+        <button id="sun-animate-btn" class="sun-animate-btn">▶ Animar día</button>
+      </div>
       <label class="row checkbox">
         <input type="checkbox" id="sun-on" checked />
         <span>Sol direccional</span>
@@ -357,6 +374,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260513"></script>
+  <script type="module" src="./js/viewer.js?v=20260514"></script>
 </body>
 </html>
