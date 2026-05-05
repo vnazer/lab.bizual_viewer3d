@@ -183,11 +183,82 @@ function escapeAttr(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Preflight: validate the API key against tile.googleapis.com before opening
+// the panel. Surfaces Google's specific error reason (much clearer than the
+// 403 the user sees from inside the tiles renderer).
+async function preflightKey(apiKey) {
+  const url = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${encodeURIComponent(apiKey)}`;
+  try {
+    const res = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      // No Referer override — let the browser send the real one so the test
+      // matches what the tiles renderer will do.
+    });
+    if (res.ok) return { ok: true };
+    let body = null;
+    try { body = await res.json(); } catch {}
+    const reason = body?.error?.message || body?.error?.status || `HTTP ${res.status}`;
+    return { ok: false, status: res.status, reason, body };
+  } catch (err) {
+    return { ok: false, status: 0, reason: err.message || 'network error' };
+  }
+}
+
+function showPreflightError(detail) {
+  const overlay = document.createElement('div');
+  overlay.id = 'g3d-key-dialog';
+  const reasonEsc = detail.reason ? detail.reason.replace(/[<>]/g, '') : 'desconocido';
+  overlay.innerHTML = `
+    <div class="g3d-dialog">
+      <h3>❌ Google rechazó la API key</h3>
+      <p style="color:#ff9b9b;font-family:ui-monospace,monospace;font-size:12px;background:rgba(255,80,80,0.08);padding:8px;border-radius:4px;border:1px solid rgba(255,80,80,0.3);">
+        ${detail.status || 'ERR'}: ${reasonEsc}
+      </p>
+      <p><strong>Causas más frecuentes</strong> (verificar EN ESTE ORDEN):</p>
+      <ol>
+        <li><strong>Billing</strong> sin habilitar en el proyecto Google Cloud (Map Tiles API requiere cuenta de facturación aunque uses el free tier de $200/mes).</li>
+        <li><strong>Map Tiles API</strong> no habilitada en el proyecto al que pertenece esta key (no en otro proyecto).</li>
+        <li><strong>Restricción HTTP referer</strong> mal configurada — Google requiere wildcard. Probá con <code>*.bizual.ai/*</code> y <code>https://lab.bizual.ai/*</code>. NO uses <code>lab.bizual.ai/v3d/</code> sin asterisco al final.</li>
+        <li><strong>Restricción de API</strong> en la key sin incluir "Map Tiles API" en la lista de APIs permitidas.</li>
+        <li><strong>Espera de propagación</strong>: si recién habilitaste algo, esperá 2-5 min.</li>
+      </ol>
+      <input type="text" id="g3d-key-input" placeholder="AIzaSy..." value="${escapeAttr(getGoogleApiKey())}" autocomplete="off" />
+      <div class="g3d-dialog-note">
+        💡 La key probada fue <code>${escapeAttr(getGoogleApiKey().slice(0, 12))}...</code> — pegá una nueva o cancelá.
+      </div>
+      <div class="g3d-dialog-btns">
+        <button id="btn-cancel-g3d-key">Cancelar</button>
+        <button class="g3d-dialog-primary" id="btn-save-g3d-key">Reintentar con nueva key</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('btn-cancel-g3d-key').addEventListener('click', () => overlay.remove());
+  document.getElementById('btn-save-g3d-key').addEventListener('click', () => {
+    const key = (document.getElementById('g3d-key-input').value || '').trim();
+    if (!key.startsWith('AIza')) { alert('La key debe empezar con "AIza..."'); return; }
+    saveGoogleApiKey(key);
+    overlay.remove();
+    // The caller will be re-invoked by the user clicking the button again.
+    document.getElementById('btn-show-g3d')?.click();
+  });
+}
+
 // ─── Main panel ───────────────────────────────────────────────────────────
 export async function openGoogle3DPanel(coords, modelUrl) {
   const { lat, lon, display } = coords;
   const apiKey = getGoogleApiKey();
   if (!apiKey) { openApiKeyDialog(coords, modelUrl); return; }
+
+  // Preflight — get a clear error message before painting the empty panel.
+  console.log('[Google 3D] preflight: testing API key against tile.googleapis.com…');
+  const pre = await preflightKey(apiKey);
+  if (!pre.ok) {
+    console.error('[Google 3D] preflight FAILED:', pre);
+    showPreflightError(pre);
+    return;
+  }
+  console.log('[Google 3D] preflight ✅ key works');
 
   closeGoogle3DPanel();
 
