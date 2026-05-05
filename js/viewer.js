@@ -7,8 +7,8 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260510';
-import { PostFX } from './postfx.js?v=20260510';
+} from './scene.js?v=20260511';
+import { PostFX } from './postfx.js?v=20260511';
 import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260508';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
@@ -928,21 +928,22 @@ document.querySelectorAll('#visual-presets .pill').forEach((btn) => {
 // "no-mistakes" baseline. Not a final look, just a smart starting point.
 // ────────────────────────────────────────────────────────────────────
 
-// HDRI light direction lookup (azimut° / elevation°). These are eyeballed from
-// the actual .hdr files in /hdri/ — the brightest spot of each one's sun/sky.
-// If a preset isn't in this map, we fall back to a neutral default.
-const HDRI_LIGHT_DIRECTION = {
-  street:     { azimut: 200, elevation: 35 },  // wide_street_01: late afternoon, sun west-ish
-  kloofendal: { azimut: 240, elevation: 45 },  // late afternoon, sun behind/right
-  studio:     { azimut: 135, elevation: 55 },  // even softboxes, fake but clean
-  sunset:     { azimut: 270, elevation: 12 },  // sun very low, west
-  indoor:     { azimut: 90,  elevation: 75 },  // mostly skylight from above
-  overcast:   { azimut: 135, elevation: 70 },  // diffuse, no real direction → near-zenith
+// HDRI light direction + scene-type lookup. Eyeballed from the actual .hdr
+// files in /hdri/. `kind: 'exterior'` means the HDRI already provides strong
+// directional outdoor light (sun, sky), so the directional sun should NOT
+// stack on top — Auto caps its intensity at 1.0 to avoid burning façades.
+const HDRI_INFO = {
+  street:     { azimut: 200, elevation: 35, kind: 'exterior' }, // late afternoon, sun west-ish
+  kloofendal: { azimut: 240, elevation: 45, kind: 'exterior' }, // late afternoon, sun behind/right
+  studio:     { azimut: 135, elevation: 55, kind: 'studio'   }, // even softboxes
+  sunset:     { azimut: 270, elevation: 12, kind: 'exterior' }, // sun very low, west
+  indoor:     { azimut: 90,  elevation: 75, kind: 'interior' }, // skylight from above
+  overcast:   { azimut: 135, elevation: 70, kind: 'exterior' }, // diffuse, near-zenith
 };
 
-function detectHDRILightDirection() {
+function detectHDRIInfo() {
   const id = ls.get('hdri', DEFAULT_HDRI_ID);
-  return HDRI_LIGHT_DIRECTION[id] || { azimut: 135, elevation: 50 };
+  return HDRI_INFO[id] || { azimut: 135, elevation: 50, kind: 'unknown' };
 }
 
 function computeAutoExposure(albedo) {
@@ -979,13 +980,22 @@ function autoCalibrate() {
     return;
   }
   const t0 = performance.now();
-  const { albedo, opaqueMaterials, transparentMaterials } = analyzeModelAlbedo(currentModel);
-  const lightDir = detectHDRILightDirection();
+  // Use p75 (75th percentile) instead of mean — ignores the darkest 25% of
+  // materials (floors, trims, dark furniture) so a mostly-white façade reads
+  // as white even with a few gray tile patches dragging the mean down.
+  const albedoStats = analyzeModelAlbedo(currentModel);
+  const { albedoP75, albedoMean, opaqueMaterials, transparentMaterials } = albedoStats;
+  const albedo = albedoP75;
+  const hdri = detectHDRIInfo();
+  const lightDir = { azimut: hdri.azimut, elevation: hdri.elevation };
   const tone = HAS_AGX ? 'agx' : 'aces';
 
   const exposure = computeAutoExposure(albedo);
   const envIntensity = albedo > 0.75 ? 0.90 : 1.10;
-  const sunIntensity = albedo > 0.75 ? 1.0 : 1.4;
+  // Sun intensity baseline by albedo; capped at 1.0 when the HDRI is exterior
+  // (it already contributes strong directional sun light → don't stack).
+  let sunIntensity = albedo > 0.75 ? 1.0 : 1.4;
+  if (hdri.kind === 'exterior') sunIntensity = Math.min(sunIntensity, 1.0);
   const bloomIntensity = computeAutoBloom(albedo);
   const contrast = albedo > 0.75 ? 0.15 : 0.10;
   const ssaoIntensity = 22;
@@ -1034,13 +1044,17 @@ function autoCalibrate() {
 
   const ms = (performance.now() - t0).toFixed(0);
   const tone_label = albedo > 0.75 ? 'blanco' : albedo < 0.35 ? 'oscuro' : 'mixto';
+  const cappedNote = (hdri.kind === 'exterior' && (albedoP75 < 0.75)) ? ' (sol cap exterior)' : '';
   flashAutoBtn();
   showAutoHint(
-    `Auto: albedo ${(albedo * 100).toFixed(0)}% (${tone_label}) · ` +
-    `${opaqueMaterials} mats opacos${transparentMaterials ? ' + ' + transparentMaterials + ' transparentes' : ''} · ` +
-    `sol ${lightDir.azimut|0}°/${lightDir.elevation|0}° · ${ms}ms`
+    `Auto: p75 ${(albedoP75 * 100).toFixed(0)}% (${tone_label}, μ ${(albedoMean * 100).toFixed(0)}%) · ` +
+    `${opaqueMaterials} mats opacos${transparentMaterials ? ' + ' + transparentMaterials + ' transp' : ''} · ` +
+    `HDRI ${hdri.kind}${cappedNote} · sol ${lightDir.azimut|0}°/${lightDir.elevation|0}° int ${sunIntensity.toFixed(1)} · ${ms}ms`
   );
-  console.log('[lab] auto-calibrate', { albedo, lightDir, exposure, envIntensity, sunIntensity, bloomIntensity, contrast, ms });
+  console.log('[lab] auto-calibrate', {
+    albedoP75, albedoMean, hdriKind: hdri.kind, lightDir,
+    exposure, envIntensity, sunIntensity, bloomIntensity, contrast, ms,
+  });
 }
 
 window.__autoCalibrate = autoCalibrate;

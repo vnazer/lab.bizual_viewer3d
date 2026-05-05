@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260510';
+import { sanitizeGLB } from './sanitize.js?v=20260511';
 
 // ────────────────────────────────────────────────────────────────────
 // HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.
@@ -436,12 +436,20 @@ export function calculateVRAM(root) {
   return { bytes: Math.round(bytes), count: seen.size };
 }
 
-// Compute average perceptual luminance of all material baseColors in a model.
-// Weighted by mesh count (one entry per mesh×material) so a heavy white wall
-// model reads as "white" even if it also has a few small dark trims.
+// Compute the perceptual albedo of a model. We return BOTH the mean and the
+// p75 (75th percentile) so callers can pick the right metric for their use:
+//
+//   • mean: representative of the whole material set (good for "is this dark?")
+//   • p75:  ignores the darkest quartile (floors, trims, dark furniture) →
+//          much better proxy for the dominant *façade/wall* color when
+//          deciding sun intensity. Default for auto-calibration.
+//
+// Each material's contribution is weighted by the number of mesh instances
+// using it, so a model with one big white wall + many tiny dark trims still
+// reads as "white" rather than averaging toward gray.
 export function analyzeModelAlbedo(root) {
-  let totalLum = 0;
-  let count = 0;
+  // material uuid -> { lum, instances }
+  const byMat = new Map();
   let opaque = 0;
   let transparent = 0;
   root.traverse((child) => {
@@ -453,15 +461,32 @@ export function analyzeModelAlbedo(root) {
         return; // skip glass / volume materials — they distort the avg
       }
       if (!m.color) return;
-      const r = m.color.r, g = m.color.g, b = m.color.b;
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      totalLum += lum;
-      count++;
-      opaque++;
+      let entry = byMat.get(m.uuid);
+      if (!entry) {
+        const r = m.color.r, g = m.color.g, b = m.color.b;
+        entry = { lum: 0.299 * r + 0.587 * g + 0.114 * b, instances: 0 };
+        byMat.set(m.uuid, entry);
+        opaque++;
+      }
+      entry.instances++;
     });
   });
+  // Weighted samples (each material contributes `instances` copies of its lum).
+  const samples = [];
+  byMat.forEach((e) => {
+    for (let i = 0; i < e.instances; i++) samples.push(e.lum);
+  });
+  if (samples.length === 0) {
+    return { albedo: 0.5, albedoMean: 0.5, albedoP75: 0.5, opaqueMaterials: 0, transparentMaterials: transparent };
+  }
+  samples.sort((a, b) => a - b);
+  const mean = samples.reduce((s, v) => s + v, 0) / samples.length;
+  // p75: take element at index 0.75 * (n-1) — represents the dominant lighter half.
+  const p75 = samples[Math.floor(0.75 * (samples.length - 1))];
   return {
-    albedo: count > 0 ? totalLum / count : 0.5,
+    albedo: p75,           // legacy field — auto-calibration now uses p75
+    albedoMean: mean,
+    albedoP75: p75,
     opaqueMaterials: opaque,
     transparentMaterials: transparent,
   };

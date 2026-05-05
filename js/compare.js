@@ -3,7 +3,7 @@ import {
   createRenderer, createScene, createCamera, createControls,
   getGLTFLoader, loadHDRI, frameObject, countTriangles, enableShadows,
   fetchManifest, loadGLBWithStats, formatBytes,
-} from './scene.js?v=20260510';
+} from './scene.js?v=20260511';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
