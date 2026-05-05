@@ -285,8 +285,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   }
 
   // ─── Google 3D Tiles ────────────────────────────────────────────────────
-  const tiles = new TilesRenderer(GOOGLE_TILES_URL);
-  tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: apiKey }));
+  // IMPORTANT: do NOT pass URL to the constructor. The official pattern uses
+  // an empty constructor and lets GoogleCloudAuthPlugin set the URL via its
+  // init() hook. Passing URL ahead can race with plugin registration in some
+  // versions and skip the auth-pipeline preprocessing.
+  const tiles = new TilesRenderer();
+  tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: apiKey, autoRefreshToken: true }));
   tiles.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader: makeDraco() }));
   tiles.registerPlugin(new UnloadTilesPlugin());
   tiles.registerPlugin(new TileCompressionPlugin());
@@ -296,31 +300,41 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   _activeTiles = tiles;
   window.__tiles = tiles;
 
-  // ── Diagnostics: surface load failures + stats so the user can debug
-  tiles.addEventListener('load-tile-set', () => {
-    console.log('[Google 3D] ✅ Tileset cargado');
-  });
-  tiles.addEventListener('load-error', (event) => {
-    const msg = event.message || event.error?.message || JSON.stringify(event);
-    console.error('[Google 3D] ❌ Error cargando tile:', msg);
-    if (/403/.test(msg)) console.error('[Google 3D] → 403: Map Tiles API no está habilitada en esta key');
-    if (/401/.test(msg)) console.error('[Google 3D] → 401: API key inválida');
-    if (/429/.test(msg)) console.error('[Google 3D] → 429: rate limit / cuota excedida');
+  console.log('[Google 3D] init', {
+    rootURL: tiles.rootURL,
+    rootLoadingState: tiles.rootLoadingState,
+    cameras: tiles.cameras?.length,
+    plugins: tiles.plugins?.length,
   });
 
-  // Periodic stats — helps diagnose "stuck on blue sky" cases.
+  // ── Diagnostics: surface load failures + stats so the user can debug
+  tiles.addEventListener('load-tile-set', () => {
+    console.log('[Google 3D] ✅ load-tile-set fired — root.json cargado');
+    console.log('[Google 3D] root tile:', tiles.root || tiles.rootTileSet);
+  });
+  tiles.addEventListener('load-error', (event) => {
+    const status = event.error?.message || event.message || '';
+    const url = event.url || '';
+    console.error('[Google 3D] ❌ load-error:', { status, url, event });
+    if (/403/.test(status)) console.error('[Google 3D] → 403: Map Tiles API no habilitada / restricción de referer no incluye este dominio');
+    if (/401/.test(status)) console.error('[Google 3D] → 401: API key inválida');
+    if (/429/.test(status)) console.error('[Google 3D] → 429: rate limit / cuota excedida');
+  });
+  tiles.addEventListener('load-content', (e) => {
+    console.log('[Google 3D] tile content loaded:', e?.tile?.content?.uri || e);
+  });
+
+  // Periodic stats — uses the actual property names from 0.4.7.
   const _statsInterval = setInterval(() => {
     if (!tiles?.stats) return;
     const s = tiles.stats;
     console.log('[Google 3D] stats:', {
-      loading: s.loading, failed: s.failed,
-      inFrustum: s.inFrustum, active: s.active, downloading: s.downloading,
+      rootLoadingState: tiles.rootLoadingState,
+      inCache: s.inCache, parsing: s.parsing, downloading: s.downloading,
+      failed: s.failed, inFrustum: s.inFrustum, active: s.active,
+      visibleTilesCount: tiles.visibleTiles?.size,
     });
-    if (s.failed > 0 && s.active === 0) {
-      console.warn('[Google 3D] All tile loads failed — verificá la API key + Map Tiles API habilitada');
-    }
   }, 5000);
-  // Stop the interval when panel closes — store on the tiles handle.
   tiles._statsInterval = _statsInterval;
 
   // OrbitControls — orbit around the building's surface point
