@@ -11,7 +11,7 @@ declare(strict_types=1);
 // ────────────────────────────────────────────────────────────────────
 const UPLOAD_TOKEN = 'im-WpTLqucq4MB3Z1EnUx8vbd7f1DevJu2upTZHhVok';
 const ALLOWED_EXT  = ['glb', 'gltf', 'bin', 'ktx2'];
-const MAX_SIZE_MB  = 50;
+const MAX_SIZE_MB  = 100;
 const MAX_SIZE     = MAX_SIZE_MB * 1024 * 1024;
 const TARGET_DIR   = __DIR__ . '/models';
 

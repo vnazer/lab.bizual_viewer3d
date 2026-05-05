@@ -6,9 +6,22 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260430';
+import { sanitizeGLB } from './sanitize.js?v=20260504';
 
-const HDRI_URL = './hdri/wide_street_01_2k.hdr';
+// ────────────────────────────────────────────────────────────────────
+// HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.
+// ────────────────────────────────────────────────────────────────────
+export const HDRI_PRESETS = {
+  street:    { label: 'Wide Street (prod default)',  file: './hdri/wide_street_01_2k.hdr' },
+  kloofendal:{ label: 'Kloofendal Late Afternoon',   file: './hdri/kloofendal_2k.hdr' },
+  studio:    { label: 'Studio neutro',               file: './hdri/studio_small_03_2k.hdr' },
+  sunset:    { label: 'Venice Sunset',               file: './hdri/venice_sunset_2k.hdr' },
+  indoor:    { label: 'Warehouse interior',          file: './hdri/empty_warehouse_01_2k.hdr' },
+  overcast:  { label: 'Overcast Soil',               file: './hdri/overcast_soil_2k.hdr' },
+};
+export const DEFAULT_HDRI_ID = 'street';
+const HDRI_URL = HDRI_PRESETS[DEFAULT_HDRI_ID].file;
+
 const DRACO_DECODER = 'https://www.gstatic.com/draco/v1/decoders/';
 const KTX2_TRANSCODER = 'https://unpkg.com/three@0.184.0/examples/jsm/libs/basis/';
 
@@ -126,60 +139,66 @@ export function getGLTFLoader(renderer) {
 }
 
 // PMREM env maps are tied to the GL context of the renderer that built them.
-// Cache the raw RGBE texture (renderer-agnostic) and produce one PMREM per renderer.
-let _rgbeTexture = null;
-let _rgbePromise = null;
-const _envByRenderer = new WeakMap();
-export function loadHDRI(renderer) {
-  const cached = _envByRenderer.get(renderer);
-  if (cached) return Promise.resolve(cached);
+// We cache RGBE textures by URL (renderer-agnostic) and PMREM-baked envs per
+// (renderer, url) tuple so switching presets doesn't re-decode the .hdr.
+const _rgbeByUrl = new Map();          // url -> Promise<DataTexture>
+const _envByRendererUrl = new WeakMap(); // renderer -> Map<url, envTexture>
 
-  const rgbeP = _rgbeTexture
-    ? Promise.resolve(_rgbeTexture)
-    : (_rgbePromise || (_rgbePromise = new Promise((resolve, reject) => {
-        new RGBELoader().load(
-          HDRI_URL,
-          (tex) => { _rgbeTexture = tex; resolve(tex); },
-          undefined,
-          (err) => { _rgbePromise = null; reject(err); }
-        );
-      })));
-
-  return rgbeP.then((tex) => buildEnvForRenderer(renderer, tex));
+function loadRGBE(url) {
+  if (_rgbeByUrl.has(url)) return _rgbeByUrl.get(url);
+  const p = new Promise((resolve, reject) => {
+    new RGBELoader().load(
+      url,
+      (tex) => resolve(tex),
+      undefined,
+      (err) => { _rgbeByUrl.delete(url); reject(err); }
+    );
+  });
+  _rgbeByUrl.set(url, p);
+  return p;
 }
 
-function buildEnvForRenderer(renderer, rgbeTex) {
+function pmremFor(renderer, url, rgbeTex) {
+  let perRenderer = _envByRendererUrl.get(renderer);
+  if (!perRenderer) {
+    perRenderer = new Map();
+    _envByRendererUrl.set(renderer, perRenderer);
+  }
+  if (perRenderer.has(url)) return perRenderer.get(url);
   const pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
   const env = pmrem.fromEquirectangular(rgbeTex).texture;
   pmrem.dispose();
-  _envByRenderer.set(renderer, env);
+  perRenderer.set(url, env);
   return env;
 }
 
-// Load a user-supplied .hdr from a File or URL and use it as the new HDRI.
-// Returns the env texture for `renderer` (PMREM-baked). Other renderers will
-// rebuild their PMREM next time loadHDRI(otherRenderer) is called.
+// Load HDRI by preset id or explicit URL. Returns PMREM-baked env texture.
+// Backwards compatible: loadHDRI(renderer) → uses default preset.
+export function loadHDRI(renderer, idOrUrl) {
+  let url;
+  if (!idOrUrl) url = HDRI_URL;
+  else if (HDRI_PRESETS[idOrUrl]) url = HDRI_PRESETS[idOrUrl].file;
+  else url = idOrUrl;
+  return loadRGBE(url).then((tex) => pmremFor(renderer, url, tex));
+}
+
+// Load a user-supplied .hdr (File or URL). Caches under a synthetic url so it
+// survives subsequent loadHDRI calls without re-decoding.
 export function setCustomHDRI(input, renderer) {
   return new Promise((resolve, reject) => {
-    const url = typeof input === 'string' ? input : URL.createObjectURL(input);
+    const isFile = typeof input !== 'string';
+    const objectUrl = isFile ? URL.createObjectURL(input) : input;
+    const cacheKey = isFile ? `custom://${input.name}-${input.size}-${input.lastModified}` : input;
     new RGBELoader().load(
-      url,
+      objectUrl,
       (tex) => {
-        if (typeof input !== 'string') URL.revokeObjectURL(url);
-        // Replace cached RGBE and invalidate every renderer's PMREM cache.
-        _rgbeTexture = tex;
-        _rgbePromise = null;
-        // WeakMap has no .clear(); we rebuild for the requesting renderer now,
-        // and other renderers will regenerate lazily on next loadHDRI call.
-        _envByRenderer.delete(renderer);
-        resolve(buildEnvForRenderer(renderer, tex));
+        if (isFile) URL.revokeObjectURL(objectUrl);
+        _rgbeByUrl.set(cacheKey, Promise.resolve(tex));
+        resolve(pmremFor(renderer, cacheKey, tex));
       },
       undefined,
-      (err) => {
-        if (typeof input !== 'string') URL.revokeObjectURL(url);
-        reject(err);
-      }
+      (err) => { if (isFile) URL.revokeObjectURL(objectUrl); reject(err); }
     );
   });
 }
@@ -277,4 +296,141 @@ export function formatBytes(b) {
   if (b < 1024) return b + ' B';
   if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
   return (b / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Pro-mode helpers: anisotropy, material introspection, extensions, VRAM.
+// ────────────────────────────────────────────────────────────────────
+
+// Apply max anisotropy to every texture slot of every material in the tree.
+// Eliminates granulado en ángulo oblicuo. Idempotent.
+const TEX_SLOTS = [
+  'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+  'aoMap', 'specularMap', 'specularIntensityMap', 'specularColorMap',
+  'transmissionMap', 'thicknessMap', 'sheenColorMap', 'sheenRoughnessMap',
+  'clearcoatMap', 'clearcoatNormalMap', 'clearcoatRoughnessMap',
+  'anisotropyMap', 'iridescenceMap', 'iridescenceThicknessMap',
+];
+
+export function applyAnisotropy(root, renderer) {
+  const max = renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+  let applied = 0;
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach((m) => {
+      TEX_SLOTS.forEach((slot) => {
+        const tex = m[slot];
+        if (tex && typeof tex === 'object' && tex.anisotropy !== undefined && tex.anisotropy !== max) {
+          tex.anisotropy = max;
+          tex.needsUpdate = true;
+          applied++;
+        }
+      });
+    });
+  });
+  return { max, slotsTouched: applied };
+}
+
+// Extract material info for the inspector panel.
+export function getMaterialsInfo(root) {
+  const materials = new Map();
+  root.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((mat) => {
+      let info = materials.get(mat.uuid);
+      if (!info) {
+        info = {
+          uuid: mat.uuid,
+          name: mat.name || '(unnamed)',
+          type: mat.type,
+          alphaMode: mat.transparent ? 'BLEND' : (mat.alphaTest > 0 ? 'MASK' : 'OPAQUE'),
+          baseColor: mat.color ? mat.color.toArray() : null,
+          opacity: mat.opacity,
+          roughness: mat.roughness,
+          metalness: mat.metalness,
+          emissive: mat.emissive ? mat.emissive.toArray() : null,
+          emissiveIntensity: mat.emissiveIntensity,
+          // KHR extensions exposed by three.js
+          transmission: mat.transmission ?? null,
+          ior: mat.ior ?? null,
+          thickness: mat.thickness ?? null,
+          attenuationDistance: mat.attenuationDistance ?? null,
+          specularIntensity: mat.specularIntensity ?? null,
+          anisotropy: mat.anisotropy ?? null,
+          iridescence: mat.iridescence ?? null,
+          clearcoat: mat.clearcoat ?? null,
+          sheen: mat.sheen ?? null,
+          textures: TEX_SLOTS.filter((s) => mat[s] && mat[s].isTexture),
+          instances: 0,
+          meshUuids: [],
+          ref: mat,
+        };
+        materials.set(mat.uuid, info);
+      }
+      info.instances++;
+      info.meshUuids.push(child.uuid);
+    });
+  });
+  return Array.from(materials.values());
+}
+
+// Read declared glTF extensions from the GLTFLoader result.
+export function getExtensions(gltf) {
+  const json = gltf?.parser?.json || {};
+  return {
+    used: Array.isArray(json.extensionsUsed) ? json.extensionsUsed.slice() : [],
+    required: Array.isArray(json.extensionsRequired) ? json.extensionsRequired.slice() : [],
+  };
+}
+
+// Estimate GPU VRAM consumed by textures in the scene.
+// Formula: w * h * bytesPerPixel * (1 + 1/3 mipmaps).
+export function calculateVRAM(root) {
+  let bytes = 0;
+  const seen = new Set();
+  root.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((mat) => {
+      TEX_SLOTS.forEach((slot) => {
+        const tex = mat[slot];
+        if (!tex || !tex.image || seen.has(tex.uuid)) return;
+        seen.add(tex.uuid);
+        const w = tex.image.width || 0;
+        const h = tex.image.height || 0;
+        // Assume RGBA8 (4 bytes/pixel) — close enough for a "what's in VRAM" estimate.
+        bytes += w * h * 4 * 1.333;
+      });
+    });
+  });
+  return { bytes: Math.round(bytes), count: seen.size };
+}
+
+// Toggle visibility so only meshes using `materialUuid` show. Returns prev state.
+export function isolateMaterial(root, materialUuid) {
+  const prevState = new Map();
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    prevState.set(child.uuid, child.visible);
+    if (!materialUuid) {
+      child.visible = true;
+      return;
+    }
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    child.visible = mats.some((m) => m.uuid === materialUuid);
+  });
+  return prevState;
+}
+
+// Toggle wireframe on a single material (or all if uuid is falsy).
+export function setWireframe(root, materialUuid, on) {
+  root.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((m) => {
+      if (!materialUuid || m.uuid === materialUuid) m.wireframe = !!on;
+    });
+  });
 }
