@@ -7,17 +7,19 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260512';
-import { PostFX } from './postfx.js?v=20260512';
-import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260512';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260512';
+} from './scene.js?v=20260513';
+import { PostFX } from './postfx.js?v=20260513';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260513';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260513';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
-  loadWaypointsForFile, saveWaypointsForFile, clearWaypointsForFile,
-  formatWaypointJSON, parseWaypointJSON, UNIT_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260512';
-import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260512';
+  loadWaypoints, saveWaypoints, clearWaypoints,
+  formatWaypointJSON, parseWaypointJSON, normalizeImportedWaypoints,
+  getWaypointSlots, guessModelTypeFromFilename,
+  UNIT_WAYPOINT_SLOTS, EDIFICIO_WAYPOINT_SLOTS,
+} from './waypoints.js?v=20260513';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260513';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -174,16 +176,22 @@ let currentModelUrl = null;
 
 function resolveModelType(model) {
   if (modelTypeOverride && modelTypeOverride !== 'auto') return modelTypeOverride;
-  return detectModelType(model);
+  // Filename hint first (cheap, often unambiguous), bbox detection as fallback.
+  const nameGuess = guessModelTypeFromFilename(currentModelUrl);
+  const bboxGuess = detectModelType(model);
+  // If the bbox says "mixto" but the filename clearly says edificio/unidad, trust the filename.
+  if (bboxGuess === 'mixto') return nameGuess;
+  return bboxGuess;
 }
 
 function refreshWaypoints() {
   if (!currentModel) return;
   activeModelType = resolveModelType(currentModel);
-  buildingWaypoints = computeBuildingWaypoints(currentModel);
-  // Unit: custom saved waypoints take priority over fallback.
-  const saved = loadWaypointsForFile(currentModelUrl);
-  unitWaypoints = saved.length ? saved : computeUnitWaypointsFallback(currentModel);
+  // Custom saved waypoints take priority over the bbox fallback for both kinds.
+  const savedBuilding = loadWaypoints('edificio', currentModelUrl);
+  const savedUnit     = loadWaypoints('unidad',   currentModelUrl);
+  buildingWaypoints = savedBuilding.length ? savedBuilding : computeBuildingWaypoints(currentModel);
+  unitWaypoints     = savedUnit.length     ? savedUnit     : computeUnitWaypointsFallback(currentModel);
 
   const badge = $('model-type-badge');
   if (badge) badge.textContent = activeModelType.charAt(0).toUpperCase() + activeModelType.slice(1);
@@ -246,10 +254,25 @@ function setAutoRotate(on) {
   }
 }
 
+// Editor scope = which model kind the editor is currently saving slots for.
+// edificio scope shares one bucket; unidad scope is per-file.
+function editorScope() {
+  // If the resolved type is "mixto", the editor follows the dropdown override
+  // when it's set to a concrete kind; otherwise default to unidad (interiors).
+  if (modelTypeOverride === 'edificio') return 'edificio';
+  if (modelTypeOverride === 'unidad')   return 'unidad';
+  return activeModelType === 'edificio' ? 'edificio' : 'unidad';
+}
+
 function renderSavedWaypoints() {
   const container = $('wp-saved-list');
   if (!container) return;
-  const saved = loadWaypointsForFile(currentModelUrl);
+  const scope = editorScope();
+  const saved = loadWaypoints(scope, currentModelUrl);
+  const scopeBadge = $('wp-scope-badge');
+  if (scopeBadge) {
+    scopeBadge.textContent = scope === 'edificio' ? 'Edificio (compartido)' : 'Unidad (este archivo)';
+  }
   if (!saved.length) {
     container.innerHTML = '<em class="hint">Ninguno todavía.</em>';
     return;
@@ -266,7 +289,7 @@ function renderSavedWaypoints() {
     row.querySelector('[data-act="go"]').addEventListener('click', () => goToWaypoint(w));
     row.querySelector('[data-act="del"]').addEventListener('click', () => {
       const next = saved.filter((x) => x.id !== w.id);
-      saveWaypointsForFile(currentModelUrl, next);
+      saveWaypoints(scope, currentModelUrl, next);
       refreshWaypoints();
     });
     container.appendChild(row);
@@ -1256,6 +1279,8 @@ if (modelTypeSelect) {
     modelTypeOverride = e.target.value;
     ls.set('modelType', modelTypeOverride);
     if (currentModel) refreshWaypoints();
+    // Re-render editor slots — they're scope-dependent (edificio vs unidad).
+    if (typeof renderEditorSlots === 'function') renderEditorSlots();
   });
 }
 
@@ -1321,17 +1346,19 @@ function renderEditorSlots() {
   if (!wpSaveSlots) return;
   wpSaveSlots.innerHTML = '';
   if (!wpEditMode?.checked) return;
-  UNIT_WAYPOINT_SLOTS.forEach((slot) => {
+  const scope = editorScope();
+  const slots = getWaypointSlots(scope);
+  slots.forEach((slot) => {
     const btn = document.createElement('button');
     btn.textContent = `💾 ${slot.icono} ${slot.label}`;
     btn.title = `Guardar pose actual como ${slot.label}`;
     btn.addEventListener('click', () => {
       if (!currentModelUrl) return;
       const pose = snapshotPose(camera, controls);
-      const saved = loadWaypointsForFile(currentModelUrl);
+      const saved = loadWaypoints(scope, currentModelUrl);
       const next = saved.filter((w) => w.id !== slot.id);
       next.push({ id: slot.id, label: slot.label, icono: slot.icono, ...pose });
-      saveWaypointsForFile(currentModelUrl, next);
+      saveWaypoints(scope, currentModelUrl, next);
       refreshWaypoints();
     });
     wpSaveSlots.appendChild(btn);
@@ -1343,9 +1370,10 @@ if (wpEditMode) {
 }
 
 $('wp-copy-json')?.addEventListener('click', async () => {
-  const saved = loadWaypointsForFile(currentModelUrl);
+  const scope = editorScope();
+  const saved = loadWaypoints(scope, currentModelUrl);
   if (!saved.length) {
-    alert('No hay waypoints guardados para este archivo.');
+    alert(`No hay waypoints guardados para ${scope === 'edificio' ? 'el edificio' : 'este archivo'}.`);
     return;
   }
   const json = formatWaypointJSON(saved);
@@ -1356,29 +1384,20 @@ $('wp-copy-json')?.addEventListener('click', async () => {
     btn.textContent = '✓ Copiado';
     setTimeout(() => { btn.textContent = old; }, 1500);
   } catch (err) {
-    // Fallback: open a prompt with the JSON.
     prompt('Copiá manualmente el JSON:', json);
   }
 });
 
 $('wp-clear-all')?.addEventListener('click', () => {
-  if (!confirm('¿Borrar todos los waypoints guardados de este archivo?')) return;
-  clearWaypointsForFile(currentModelUrl);
+  const scope = editorScope();
+  const target = scope === 'edificio' ? 'del edificio' : 'de este archivo';
+  if (!confirm(`¿Borrar todos los waypoints guardados ${target}?`)) return;
+  clearWaypoints(scope, currentModelUrl);
   refreshWaypoints();
 });
 
-$('wp-import')?.addEventListener('click', () => {
-  const text = prompt('Pegá el JSON exportado del SaaS o de otro lab:');
-  if (!text) return;
-  try {
-    const list = parseWaypointJSON(text);
-    saveWaypointsForFile(currentModelUrl, list);
-    refreshWaypoints();
-    alert(`Importados ${list.length} waypoints.`);
-  } catch (err) {
-    alert('Error: ' + err.message);
-  }
-});
+// Import button → opens the rich modal (file/paste/drop + preview + normalize).
+$('wp-import')?.addEventListener('click', () => openImportModal());
 
 // Custom HDRI upload (also persists to IndexedDB so it survives reloads)
 $('btn-hdri').addEventListener('click', () => $('hdri-input').click());
@@ -1676,4 +1695,154 @@ window.addEventListener('keydown', (e) => {
       alert('Token borrado. Se va a pedir la próxima vez que subas algo.');
     }
   }
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Modals: import waypoints + map embed
+// ────────────────────────────────────────────────────────────────────
+const modalOverlay = $('modal-overlay');
+const modalImport  = $('modal-import');
+const modalMap     = $('modal-map');
+
+function openModal(which) {
+  if (!modalOverlay) return;
+  modalOverlay.classList.remove('hidden');
+  [modalImport, modalMap].forEach((m) => m?.classList.add('hidden'));
+  which.classList.remove('hidden');
+}
+function closeModal() {
+  modalOverlay?.classList.add('hidden');
+  // Reset import modal state
+  const text = $('import-json-text'); if (text) text.value = '';
+  const preview = $('import-preview'); if (preview) preview.classList.add('hidden');
+  const errorBox = $('import-error'); if (errorBox) errorBox.classList.add('hidden');
+  const confirmBtn = $('import-confirm'); if (confirmBtn) confirmBtn.disabled = true;
+  pendingImportList = null;
+  // Stop iframe load
+  const iframe = $('map-iframe'); if (iframe) iframe.src = '';
+}
+
+modalOverlay?.addEventListener('click', (e) => {
+  // Close when clicking overlay (not the modal box).
+  if (e.target === modalOverlay) closeModal();
+});
+document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closeModal));
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !modalOverlay?.classList.contains('hidden')) closeModal();
+});
+
+// ── Import waypoints modal ─────────────────────────────────────────
+let pendingImportList = null;
+
+function openImportModal() {
+  openModal(modalImport);
+  $('import-json-text')?.focus();
+}
+
+function previewImportText(text) {
+  const preview = $('import-preview');
+  const errorBox = $('import-error');
+  const confirmBtn = $('import-confirm');
+  preview?.classList.add('hidden');
+  errorBox?.classList.add('hidden');
+  if (confirmBtn) confirmBtn.disabled = true;
+  pendingImportList = null;
+  if (!text || !text.trim()) return;
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch {
+    if (errorBox) { errorBox.textContent = 'JSON inválido — revisá la sintaxis.'; errorBox.classList.remove('hidden'); }
+    return;
+  }
+  let list;
+  try { list = normalizeImportedWaypoints(parsed); }
+  catch (err) {
+    if (errorBox) { errorBox.textContent = err.message; errorBox.classList.remove('hidden'); }
+    return;
+  }
+  pendingImportList = list;
+  if (preview) {
+    const labels = list.slice(0, 6).map((w) => `${w.icono || '•'} ${w.label}`).join(', ');
+    const more = list.length > 6 ? ` <em>(+${list.length - 6} más)</em>` : '';
+    preview.innerHTML = `
+      <div class="preview-title">📋 Detectados ${list.length} waypoint${list.length === 1 ? '' : 's'}</div>
+      <div class="preview-list">${labels}${more}</div>
+    `;
+    preview.classList.remove('hidden');
+  }
+  if (confirmBtn) confirmBtn.disabled = false;
+}
+
+$('import-json-text')?.addEventListener('input', (e) => previewImportText(e.target.value));
+
+$('import-json-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const text = await file.text();
+  $('import-json-text').value = text;
+  previewImportText(text);
+  e.target.value = '';
+});
+
+// Drag-drop directly onto the import modal.
+modalImport?.addEventListener('dragover', (e) => { e.preventDefault(); modalImport.classList.add('drag-over'); });
+modalImport?.addEventListener('dragleave', (e) => { if (e.target === modalImport) modalImport.classList.remove('drag-over'); });
+modalImport?.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  modalImport.classList.remove('drag-over');
+  const file = e.dataTransfer?.files?.[0];
+  if (!file || !file.name.toLowerCase().endsWith('.json')) return;
+  const text = await file.text();
+  $('import-json-text').value = text;
+  previewImportText(text);
+});
+
+$('import-confirm')?.addEventListener('click', () => {
+  if (!pendingImportList) return;
+  const scope = editorScope();
+  saveWaypoints(scope, currentModelUrl, pendingImportList);
+  refreshWaypoints();
+  closeModal();
+});
+
+// ── Project address + Map embed modal ───────────────────────────────
+const addressInput = $('project-address');
+if (addressInput) {
+  addressInput.value = ls.get('proyecto_direccion', '');
+  addressInput.addEventListener('change', (e) => ls.set('proyecto_direccion', e.target.value.trim()));
+  addressInput.addEventListener('blur',   (e) => ls.set('proyecto_direccion', e.target.value.trim()));
+}
+
+const MAP_MODE_BUILDERS = {
+  satelite:   (a) => `https://maps.google.com/maps?q=${a}&t=k&z=19&output=embed`,
+  mapa:       (a) => `https://maps.google.com/maps?q=${a}&z=18&output=embed`,
+  streetview: (a) => `https://maps.google.com/maps?q=${a}&layer=c&cbll=&cbp=11,0,0,0,0&z=18&output=embed`,
+};
+
+function loadMapMode(mode) {
+  const addr = (addressInput?.value || '').trim();
+  if (!addr) return;
+  const iframe = $('map-iframe');
+  if (!iframe) return;
+  iframe.src = MAP_MODE_BUILDERS[mode](encodeURIComponent(addr));
+  document.querySelectorAll('.map-modes .pill').forEach((b) => {
+    b.classList.toggle('active', b.dataset.mapMode === mode);
+  });
+}
+
+$('btn-show-map')?.addEventListener('click', () => {
+  const addr = (addressInput?.value || '').trim();
+  if (!addr) {
+    addressInput?.focus();
+    addressInput?.classList.add('input-error');
+    setTimeout(() => addressInput?.classList.remove('input-error'), 1200);
+    return;
+  }
+  $('map-address').textContent = addr;
+  openModal(modalMap);
+  loadMapMode('satelite');
+});
+
+document.querySelectorAll('.map-modes .pill').forEach((btn) => {
+  btn.addEventListener('click', () => loadMapMode(btn.dataset.mapMode));
 });

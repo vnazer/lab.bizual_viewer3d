@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260512';
+import { sanitizeGLB } from './sanitize.js?v=20260513';
 
 // ────────────────────────────────────────────────────────────────────
 // HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.

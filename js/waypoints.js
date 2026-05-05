@@ -65,15 +65,41 @@ export function computeUnitWaypointsFallback(model) {
   ];
 }
 
-// Slots that the unit-mode editor offers to "Save as ___".
+// "Save as ___" slots that the editor offers — different per model kind.
 export const UNIT_WAYPOINT_SLOTS = [
-  { id: 'entrada',    label: 'Entrada',    icono: '🏠' },
+  { id: 'entrada',    label: 'Entrada',    icono: '🚪' },
   { id: 'living',     label: 'Living',     icono: '🛋️' },
   { id: 'cocina',     label: 'Cocina',     icono: '🍳' },
   { id: 'dormitorio', label: 'Dormitorio', icono: '🛏️' },
-  { id: 'terraza',    label: 'Terraza',    icono: '☀️' },
+  { id: 'bano',       label: 'Baño',       icono: '🚿' },
+  { id: 'terraza',    label: 'Terraza',    icono: '🌿' },
   { id: 'cenital',    label: 'Cenital',    icono: '⬆️' },
 ];
+
+export const EDIFICIO_WAYPOINT_SLOTS = [
+  { id: 'hall_acceso',   label: 'Hall Acceso',    icono: '🚪' },
+  { id: 'lobby',         label: 'Lobby',          icono: '🏛️' },
+  { id: 'quincho',       label: 'Quincho',        icono: '🍖' },
+  { id: 'piscina',       label: 'Área Piscina',   icono: '🏊' },
+  { id: 'terraza_comun', label: 'Terraza Común',  icono: '🌇' },
+  { id: 'jardin',        label: 'Jardín',         icono: '🌿' },
+  { id: 'vista_general', label: 'Vista General',  icono: '🏢' },
+  { id: 'vista_aerea',   label: 'Vista Aérea',    icono: '⬆️' },
+];
+
+export function getWaypointSlots(modelType) {
+  return modelType === 'edificio' ? EDIFICIO_WAYPOINT_SLOTS : UNIT_WAYPOINT_SLOTS;
+}
+
+// Infer model type from a GLB filename (used when the override is "auto" and
+// we want a quick guess without computing a bbox).
+export function guessModelTypeFromFilename(filename) {
+  if (!filename) return 'unidad';
+  const f = String(filename).toLowerCase();
+  if (/(exterior|edificio|general|completo|fachada)/.test(f)) return 'edificio';
+  if (/(tipologia|unidad|interior|dpto|departamento)/.test(f)) return 'unidad';
+  return 'unidad';
+}
 
 // ────────────────────────────────────────────────────────────────────
 // CameraController — smooth lerp to a (position, target) pair.
@@ -177,6 +203,15 @@ export function fileKey(urlOrName) {
   return djb2(last);
 }
 
+// Segmented storage key: edificio waypoints share one bucket across files,
+// while tipologia waypoints stay per-file (each unit has its own POIs).
+export function storageKeyFor(modelType, urlOrName) {
+  if (modelType === 'edificio') return LS_PREFIX + 'edificio';
+  return LS_PREFIX + 'tipologia_' + fileKey(urlOrName);
+}
+
+// Legacy (per-file only). Kept for backwards compatibility — viewer.js now
+// prefers loadWaypoints(modelType, url) below.
 export function loadWaypointsForFile(urlOrName) {
   try {
     const raw = localStorage.getItem(LS_PREFIX + fileKey(urlOrName));
@@ -196,11 +231,41 @@ export function clearWaypointsForFile(urlOrName) {
   localStorage.removeItem(LS_PREFIX + fileKey(urlOrName));
 }
 
+// Segmented storage:
+//   • edificio   → one shared bucket per project (most labs have a single bldg)
+//   • tipologia  → per-file bucket (each unit has its own POIs)
+export function loadWaypoints(modelType, urlOrName) {
+  // Migrate from legacy per-file key if the segmented one is empty.
+  const key = storageKeyFor(modelType, urlOrName);
+  try {
+    let raw = localStorage.getItem(key);
+    if (!raw && modelType !== 'edificio') {
+      // Try legacy
+      raw = localStorage.getItem(LS_PREFIX + fileKey(urlOrName));
+      if (raw) localStorage.setItem(key, raw); // promote to new key
+    }
+    if (!raw) return [];
+    const data = JSON.parse(raw);
+    return Array.isArray(data?.waypoints) ? data.waypoints : [];
+  } catch { return []; }
+}
+
+export function saveWaypoints(modelType, urlOrName, waypoints) {
+  try {
+    localStorage.setItem(storageKeyFor(modelType, urlOrName), JSON.stringify({ waypoints }));
+  } catch {}
+}
+
+export function clearWaypoints(modelType, urlOrName) {
+  localStorage.removeItem(storageKeyFor(modelType, urlOrName));
+}
+
 // JSON format matches what `tipologias.waypoints_json` stores in the SaaS DB.
 export function formatWaypointJSON(waypoints) {
   return JSON.stringify({ waypoints }, null, 2);
 }
 
+// Strict parser: only accepts the canonical {waypoints:[{id, position[3], target[3]}]} shape.
 export function parseWaypointJSON(text) {
   const data = JSON.parse(text);
   const list = Array.isArray(data) ? data : data?.waypoints;
@@ -211,4 +276,42 @@ export function parseWaypointJSON(text) {
     }
   });
   return list;
+}
+
+// Flexible normalizer: accepts 4 shapes and converts to the canonical form.
+//   1. [...]                 → array of waypoints directly
+//   2. { waypoints: [...] }  → editor export (canonical)
+//   3. { rooms:     [...] }  → spec interior format with .camera
+//   4. { views:     [...] }  → spec exterior format with .camera
+//
+// Each item must end up with: { id, label?, icono?, position[3], target[3] }.
+// Items may use either { position, target } or { camera: { position, target } }.
+export function normalizeImportedWaypoints(raw) {
+  let list;
+  if (Array.isArray(raw)) list = raw;
+  else if (Array.isArray(raw?.waypoints)) list = raw.waypoints;
+  else if (Array.isArray(raw?.rooms)) list = raw.rooms;
+  else if (Array.isArray(raw?.views)) list = raw.views;
+  else throw new Error('Formato JSON no reconocido (esperaba array, .waypoints, .rooms o .views)');
+
+  const out = list.map((w, i) => {
+    const cam = w.camera || w;
+    const position = w.position || cam.position;
+    const target   = w.target   || cam.target;
+    if (!Array.isArray(position) || position.length < 3) {
+      throw new Error(`Waypoint #${i + 1}: falta position[3]`);
+    }
+    if (!Array.isArray(target) || target.length < 3) {
+      throw new Error(`Waypoint #${i + 1}: falta target[3]`);
+    }
+    if (!w.id && !w.label) throw new Error(`Waypoint #${i + 1}: falta id o label`);
+    return {
+      id: w.id || (w.label || '').toLowerCase().replace(/\s+/g, '_'),
+      label: w.label || w.id,
+      icono: w.icono || w.icon || '•',
+      position: position.slice(0, 3).map(Number),
+      target: target.slice(0, 3).map(Number),
+    };
+  });
+  return out;
 }
