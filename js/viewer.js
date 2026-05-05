@@ -7,15 +7,17 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260511';
-import { PostFX } from './postfx.js?v=20260511';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260508';
+} from './scene.js?v=20260512';
+import { PostFX } from './postfx.js?v=20260512';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260512';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260512';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
   loadWaypointsForFile, saveWaypointsForFile, clearWaypointsForFile,
   formatWaypointJSON, parseWaypointJSON, UNIT_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260508';
+} from './waypoints.js?v=20260512';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260512';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -118,6 +120,7 @@ function setNavMode(mode, { fromUser = true } = {}) {
   }
   navMode = mode;
   ls.set('navMode', mode);
+  setUnitMode(mode);
   // Sync UI radios
   document.querySelectorAll('.nav-mode').forEach((el) => {
     el.classList.toggle('active', el.dataset.mode === mode);
@@ -134,6 +137,32 @@ window.__setNavMode = setNavMode;
 // ────────────────────────────────────────────────────────────────────
 const cameraCtrl = new CameraController(camera, controls);
 window.__cameraCtrl = cameraCtrl;
+
+// Unit labels + dblclick-to-enter (lazy: needs ./models/unidades.json)
+initUnitLabels({ camera, renderer, scene }).then((ok) => {
+  if (ok) setupDblclickEntry({ scene, camera, renderer });
+});
+
+// When a label or dblclick selects a unit: load its tipologia GLB.
+registerUnitClickHandler((unidad) => {
+  const url = unidad.tipologia_url || (unidad.tipologia ? `./models/${unidad.tipologia}` : null);
+  if (!url) {
+    console.log(`[units] Unidad ${unidad.numero} sin tipologia_url`);
+    return;
+  }
+  // Prefer the model dropdown so all tracking (waypoints, materials, etc.)
+  // refreshes consistently.
+  const sel = $('model-select');
+  if (sel) {
+    const found = Array.from(sel.options).find((o) => o.value === url || o.value.endsWith('/' + url) || o.textContent === url.split('/').pop());
+    if (found) {
+      sel.value = found.value;
+      loadModel(found.value);
+      return;
+    }
+  }
+  loadModel(url);
+});
 
 let modelTypeOverride = ls.get('modelType', 'auto'); // 'auto' | 'edificio' | 'unidad' | 'mixto'
 let activeModelType = 'unidad'; // resolved type currently in use
@@ -404,7 +433,41 @@ async function applyHDRIPreset(id) {
   }
 }
 
-applyHDRIPreset(hdriSelect ? hdriSelect.value : DEFAULT_HDRI_ID);
+// Async HDRI bootstrap: prefer the user's persisted custom HDRI from IndexedDB,
+// fall back to selected preset.
+async function bootstrapHDRI() {
+  if (hasCustomHDRI()) {
+    try {
+      const record = await loadCustomHDRI();
+      if (record?.data) {
+        const env = await setCustomHDRI(record.data, renderer, record.name || 'custom');
+        envTex = env;
+        if ($('toggle-hdri').checked) {
+          scene.environment = env;
+          scene.background = env;
+        }
+        updateCustomHDRIBadge(record.name || 'custom HDRI');
+        return;
+      }
+    } catch (err) {
+      console.warn('[lab] could not restore persisted HDRI, falling back:', err);
+    }
+  }
+  applyHDRIPreset(hdriSelect ? hdriSelect.value : DEFAULT_HDRI_ID);
+}
+
+function updateCustomHDRIBadge(name) {
+  const wrap = $('custom-hdri-status');
+  if (!wrap) return;
+  if (name) {
+    wrap.style.display = '';
+    wrap.querySelector('.custom-hdri-name').textContent = name;
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
+bootstrapHDRI();
 
 // Populate model dropdown
 async function populateModels() {
@@ -946,6 +1009,16 @@ function detectHDRIInfo() {
   return HDRI_INFO[id] || { azimut: 135, elevation: 50, kind: 'unknown' };
 }
 
+// 4-tier sun intensity curve (more granular than the previous 2-tier).
+// Same intent: brighter scenes get less sun (no façade burn), darker scenes
+// more (volume definition).
+function computeAutoSunIntensity(albedo) {
+  if (albedo > 0.75) return 0.85;
+  if (albedo > 0.55) return 1.10;
+  if (albedo < 0.35) return 1.40;
+  return 1.20;
+}
+
 function computeAutoExposure(albedo) {
   if (albedo > 0.75) return 0.95; // mostly white → don't blow highlights
   if (albedo < 0.35) return 1.30; // dark model → boost
@@ -994,7 +1067,9 @@ function autoCalibrate() {
   const envIntensity = albedo > 0.75 ? 0.90 : 1.10;
   // Sun intensity baseline by albedo; capped at 1.0 when the HDRI is exterior
   // (it already contributes strong directional sun light → don't stack).
-  let sunIntensity = albedo > 0.75 ? 1.0 : 1.4;
+  let sunIntensity = computeAutoSunIntensity(albedo);
+  // Exterior HDRI already provides strong directional sun light → cap so we
+  // don't stack and burn façades.
   if (hdri.kind === 'exterior') sunIntensity = Math.min(sunIntensity, 1.0);
   const bloomIntensity = computeAutoBloom(albedo);
   const contrast = albedo > 0.75 ? 0.15 : 0.10;
@@ -1305,25 +1380,40 @@ $('wp-import')?.addEventListener('click', () => {
   }
 });
 
-// Custom HDRI upload
+// Custom HDRI upload (also persists to IndexedDB so it survives reloads)
 $('btn-hdri').addEventListener('click', () => $('hdri-input').click());
 $('hdri-input').addEventListener('change', async (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
   $('hdri-name').textContent = `Cargando ${file.name}…`;
   try {
-    envTex = await setCustomHDRI(file, renderer);
+    // Read once into ArrayBuffer so we can both render AND persist.
+    const arrayBuffer = await file.arrayBuffer();
+    envTex = await setCustomHDRI(arrayBuffer, renderer, file.name);
     if ($('toggle-hdri').checked) {
       scene.environment = envTex;
       scene.background = envTex;
     }
     $('hdri-name').textContent = `✓ ${file.name}`;
+    try {
+      await saveCustomHDRI(arrayBuffer, file.name);
+      updateCustomHDRIBadge(file.name);
+    } catch (persistErr) {
+      console.warn('[lab] HDRI applied but could not persist:', persistErr);
+    }
   } catch (err) {
     console.error('[hdri] failed:', err);
     $('hdri-name').textContent = `✗ Error: ${err.message || err}`;
   } finally {
     e.target.value = '';
   }
+});
+
+// Clear custom HDRI → revert to currently-selected preset
+$('btn-hdri-clear')?.addEventListener('click', async () => {
+  await clearCustomHDRI();
+  updateCustomHDRIBadge(null);
+  applyHDRIPreset(hdriSelect ? hdriSelect.value : DEFAULT_HDRI_ID);
 });
 
 // Resize
@@ -1378,6 +1468,7 @@ function animate() {
   } else {
     renderer.render(scene, camera);
   }
+  updateUnitLabels();
   updateFPS();
 }
 

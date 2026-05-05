@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260511';
+import { sanitizeGLB } from './sanitize.js?v=20260512';
 
 // ────────────────────────────────────────────────────────────────────
 // HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.
@@ -209,20 +209,36 @@ export function loadHDRI(renderer, idOrUrl) {
 
 // Load a user-supplied .hdr (File or URL). Caches under a synthetic url so it
 // survives subsequent loadHDRI calls without re-decoding.
-export function setCustomHDRI(input, renderer) {
+// Accepts a File, ArrayBuffer (for persisted HDRIs from IndexedDB), or URL string.
+// When ArrayBuffer is passed, supply a `cacheName` so we can key the cache.
+export function setCustomHDRI(input, renderer, cacheName) {
   return new Promise((resolve, reject) => {
-    const isFile = typeof input !== 'string';
-    const objectUrl = isFile ? URL.createObjectURL(input) : input;
-    const cacheKey = isFile ? `custom://${input.name}-${input.size}-${input.lastModified}` : input;
+    const isString = typeof input === 'string';
+    const isArrayBuffer = !isString && input instanceof ArrayBuffer;
+    const isFile = !isString && !isArrayBuffer;
+    let objectUrl;
+    let cacheKey;
+    if (isString) {
+      objectUrl = input;
+      cacheKey = input;
+    } else if (isArrayBuffer) {
+      const blob = new Blob([input], { type: 'application/octet-stream' });
+      objectUrl = URL.createObjectURL(blob);
+      cacheKey = `custom://buffer-${cacheName || input.byteLength}`;
+    } else {
+      objectUrl = URL.createObjectURL(input);
+      cacheKey = `custom://${input.name}-${input.size}-${input.lastModified}`;
+    }
+    const needsRevoke = !isString;
     new RGBELoader().load(
       objectUrl,
       (tex) => {
-        if (isFile) URL.revokeObjectURL(objectUrl);
+        if (needsRevoke) URL.revokeObjectURL(objectUrl);
         _rgbeByUrl.set(cacheKey, Promise.resolve(tex));
         resolve(pmremFor(renderer, cacheKey, tex));
       },
       undefined,
-      (err) => { if (isFile) URL.revokeObjectURL(objectUrl); reject(err); }
+      (err) => { if (needsRevoke) URL.revokeObjectURL(objectUrl); reject(err); }
     );
   });
 }

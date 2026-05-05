@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260511" />
+  <link rel="stylesheet" href="./css/style.css?v=20260512" />
   <script type="importmap">
   {
     "imports": {
@@ -17,6 +17,7 @@
 </head>
 <body>
   <div id="canvas-wrap"></div>
+  <div id="labels-container"></div>
 
   <aside id="hud">
     <header>
@@ -143,6 +144,11 @@
         <button id="btn-hdri">🌅 Cargar HDRI custom (.hdr)</button>
         <small class="hint" id="hdri-name">Default: Wide Street 2k</small>
         <input type="file" id="hdri-input" accept=".hdr" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" />
+        <div id="custom-hdri-status" class="custom-hdri-row" style="display:none;">
+          <span class="custom-hdri-check">✓</span>
+          <span class="custom-hdri-name"></span>
+          <button id="btn-hdri-clear" class="custom-hdri-clear" title="Limpiar HDRI custom y volver al preset">× Limpiar</button>
+        </div>
       </div>
       <label class="row">
         <span>Tone Mapping</span>
@@ -302,6 +308,6 @@
     <div class="up-pct">0%</div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260511"></script>
+  <script type="module" src="./js/viewer.js?v=20260512"></script>
 </body>
 </html>
