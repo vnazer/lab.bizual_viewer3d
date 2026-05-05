@@ -5,9 +5,10 @@ import {
   fetchManifest, loadGLBWithStats, formatBytes,
   HDRI_PRESETS, DEFAULT_HDRI_ID, setSunDirection,
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
+  analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260509';
-import { PostFX } from './postfx.js?v=20260509';
+} from './scene.js?v=20260510';
+import { PostFX } from './postfx.js?v=20260510';
 import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260508';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
@@ -921,6 +922,130 @@ function applyPreset(id) {
 document.querySelectorAll('#visual-presets .pill').forEach((btn) => {
   btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
 });
+
+// ────────────────────────────────────────────────────────────────────
+// Auto-calibrate: analyze model albedo + active HDRI → set sliders to a
+// "no-mistakes" baseline. Not a final look, just a smart starting point.
+// ────────────────────────────────────────────────────────────────────
+
+// HDRI light direction lookup (azimut° / elevation°). These are eyeballed from
+// the actual .hdr files in /hdri/ — the brightest spot of each one's sun/sky.
+// If a preset isn't in this map, we fall back to a neutral default.
+const HDRI_LIGHT_DIRECTION = {
+  street:     { azimut: 200, elevation: 35 },  // wide_street_01: late afternoon, sun west-ish
+  kloofendal: { azimut: 240, elevation: 45 },  // late afternoon, sun behind/right
+  studio:     { azimut: 135, elevation: 55 },  // even softboxes, fake but clean
+  sunset:     { azimut: 270, elevation: 12 },  // sun very low, west
+  indoor:     { azimut: 90,  elevation: 75 },  // mostly skylight from above
+  overcast:   { azimut: 135, elevation: 70 },  // diffuse, no real direction → near-zenith
+};
+
+function detectHDRILightDirection() {
+  const id = ls.get('hdri', DEFAULT_HDRI_ID);
+  return HDRI_LIGHT_DIRECTION[id] || { azimut: 135, elevation: 50 };
+}
+
+function computeAutoExposure(albedo) {
+  if (albedo > 0.75) return 0.95; // mostly white → don't blow highlights
+  if (albedo < 0.35) return 1.30; // dark model → boost
+  return 1.10;
+}
+
+function computeAutoBloom(albedo) {
+  if (albedo > 0.75) return 0.08; // white already feels bright, keep bloom subtle
+  if (albedo < 0.35) return 0.25;
+  return 0.15;
+}
+
+function flashAutoBtn() {
+  const btn = $('btn-auto-calibrate');
+  if (!btn) return;
+  btn.classList.add('flash');
+  setTimeout(() => btn.classList.remove('flash'), 700);
+}
+
+function showAutoHint(text) {
+  const el = $('auto-hint');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = '';
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, 3500);
+}
+
+function autoCalibrate() {
+  if (!currentModel) {
+    showAutoHint('No hay modelo cargado todavía.');
+    return;
+  }
+  const t0 = performance.now();
+  const { albedo, opaqueMaterials, transparentMaterials } = analyzeModelAlbedo(currentModel);
+  const lightDir = detectHDRILightDirection();
+  const tone = HAS_AGX ? 'agx' : 'aces';
+
+  const exposure = computeAutoExposure(albedo);
+  const envIntensity = albedo > 0.75 ? 0.90 : 1.10;
+  const sunIntensity = albedo > 0.75 ? 1.0 : 1.4;
+  const bloomIntensity = computeAutoBloom(albedo);
+  const contrast = albedo > 0.75 ? 0.15 : 0.10;
+  const ssaoIntensity = 22;
+
+  // Apply renderer-side
+  renderer.toneMapping = TONEMAP_BY_ID[tone];
+  renderer.toneMappingExposure = exposure;
+  scene.environmentIntensity = envIntensity;
+  window.__envIntensity = envIntensity;
+  // Force material recompile for tone-mapping change.
+  currentModel.traverse((o) => {
+    if (o.isMesh && o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => { m.needsUpdate = true; });
+    }
+  });
+
+  // Update visual state + persist
+  const v = window.__visualState;
+  v.sun = { on: true, intensity: sunIntensity, azimut: lightDir.azimut, elevation: lightDir.elevation };
+  v.ssao = { on: true, intensity: ssaoIntensity };
+  v.bloom = { on: true, intensity: bloomIntensity };
+  v.contrast = contrast;
+  ls.set('exposure', exposure);
+  ls.set('envIntensity', envIntensity);
+  ls.set('tonemap', tone);
+  ls.set('sun_on', true);
+  ls.set('sun_intensity', sunIntensity);
+  ls.set('sun_azimut', lightDir.azimut);
+  ls.set('sun_elevation', lightDir.elevation);
+  ls.set('ssao_on', true);
+  ls.set('ssao_intensity', ssaoIntensity);
+  ls.set('bloom_on', true);
+  ls.set('bloom_intensity', bloomIntensity);
+  ls.set('contrast', contrast);
+
+  // Apply scene-side
+  applySun();
+  applyVisual();
+  syncSunUI();
+  syncVisualUI();
+  // Sync the iluminación sliders/select too
+  if (expoSlider) { expoSlider.value = exposure; if (expoOut) expoOut.textContent = exposure.toFixed(2); }
+  if (envSlider)  { envSlider.value  = envIntensity; if (envOut) envOut.textContent  = envIntensity.toFixed(2); }
+  if (tonemapSel) tonemapSel.value = tone;
+
+  const ms = (performance.now() - t0).toFixed(0);
+  const tone_label = albedo > 0.75 ? 'blanco' : albedo < 0.35 ? 'oscuro' : 'mixto';
+  flashAutoBtn();
+  showAutoHint(
+    `Auto: albedo ${(albedo * 100).toFixed(0)}% (${tone_label}) · ` +
+    `${opaqueMaterials} mats opacos${transparentMaterials ? ' + ' + transparentMaterials + ' transparentes' : ''} · ` +
+    `sol ${lightDir.azimut|0}°/${lightDir.elevation|0}° · ${ms}ms`
+  );
+  console.log('[lab] auto-calibrate', { albedo, lightDir, exposure, envIntensity, sunIntensity, bloomIntensity, contrast, ms });
+}
+
+window.__autoCalibrate = autoCalibrate;
+
+$('btn-auto-calibrate')?.addEventListener('click', autoCalibrate);
 
 // Wireframe global toggle
 const wireAll = $('toggle-wireframe-all');

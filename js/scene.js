@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260509';
+import { sanitizeGLB } from './sanitize.js?v=20260510';
 
 // ────────────────────────────────────────────────────────────────────
 // HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.
@@ -81,7 +81,11 @@ export function createScene() {
   sun.shadow.camera.bottom = -25;
   sun.shadow.camera.near = 0.5;
   sun.shadow.camera.far = 100;
-  sun.shadow.bias = -0.0005;
+  // normalBias displaces samples along the surface normal — kills shimmer on
+  // near-flat geometry (grass plane, sidewalks) without losing balcony shadows.
+  // Pair it with a tiny bias so steep-angle surfaces still resolve cleanly.
+  sun.shadow.normalBias = 0.04;
+  sun.shadow.bias = -0.0001;
   sun.shadow.radius = 4; // soft shadow PCF
   scene.add(sun);
 
@@ -430,6 +434,37 @@ export function calculateVRAM(root) {
     });
   });
   return { bytes: Math.round(bytes), count: seen.size };
+}
+
+// Compute average perceptual luminance of all material baseColors in a model.
+// Weighted by mesh count (one entry per mesh×material) so a heavy white wall
+// model reads as "white" even if it also has a few small dark trims.
+export function analyzeModelAlbedo(root) {
+  let totalLum = 0;
+  let count = 0;
+  let opaque = 0;
+  let transparent = 0;
+  root.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((m) => {
+      if (m.transparent || (m.transmission != null && m.transmission > 0)) {
+        transparent++;
+        return; // skip glass / volume materials — they distort the avg
+      }
+      if (!m.color) return;
+      const r = m.color.r, g = m.color.g, b = m.color.b;
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      totalLum += lum;
+      count++;
+      opaque++;
+    });
+  });
+  return {
+    albedo: count > 0 ? totalLum / count : 0.5,
+    opaqueMaterials: opaque,
+    transparentMaterials: transparent,
+  };
 }
 
 // Toggle visibility so only meshes using `materialUuid` show. Returns prev state.

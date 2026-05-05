@@ -458,6 +458,32 @@ button:hover { background: rgba(102, 204, 255, 0.25); }
 body.nav-fps #canvas-wrap canvas { cursor: none; }
 body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
 
+/* preset row: pills + auto button side-by-side */
+.preset-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 4px;
+}
+.preset-row .pill-group { flex: 1; margin-top: 0; }
+.auto-btn {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.auto-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.auto-btn.flash { background: rgba(102, 204, 255, 0.25); border-color: var(--accent); }
+
 /* pill-group: 4 inline radio-style buttons */
 .pill-group {
   display: flex;

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260509" />
+  <link rel="stylesheet" href="./css/style.css?v=20260510" />
   <script type="importmap">
   {
     "imports": {
@@ -209,11 +209,15 @@
     <details class="panel" open>
       <summary>Visual</summary>
       <div class="row label-only"><span>Preset</span></div>
-      <div class="pill-group" id="visual-presets" role="radiogroup" aria-label="Visual preset">
-        <button type="button" class="pill" data-preset="plano">Plano</button>
-        <button type="button" class="pill active" data-preset="estandar">Estándar</button>
-        <button type="button" class="pill" data-preset="cinematic">Cinematic</button>
+      <div class="preset-row">
+        <div class="pill-group" id="visual-presets" role="radiogroup" aria-label="Visual preset">
+          <button type="button" class="pill" data-preset="plano">Plano</button>
+          <button type="button" class="pill active" data-preset="estandar">Estándar</button>
+          <button type="button" class="pill" data-preset="cinematic">Cinematic</button>
+        </div>
+        <button type="button" id="btn-auto-calibrate" class="auto-btn" title="Auto-calibrar según modelo + HDRI">⚡ Auto</button>
       </div>
+      <small class="hint" id="auto-hint" style="display:none;"></small>
       <label class="row slider">
         <span>Contraste</span>
         <input type="range" id="contrast" min="-0.5" max="0.5" step="0.01" value="0.10" />
@@ -298,6 +302,6 @@
     <div class="up-pct">0%</div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260509"></script>
+  <script type="module" src="./js/viewer.js?v=20260510"></script>
 </body>
 </html>
