@@ -7,10 +7,10 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260516';
-import { PostFX } from './postfx.js?v=20260516';
-import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260516';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260516';
+} from './scene.js?v=20260517';
+import { PostFX } from './postfx.js?v=20260517';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260517';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260517';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
@@ -18,8 +18,8 @@ import {
   formatWaypointJSON, parseWaypointJSON, normalizeImportedWaypoints,
   getWaypointSlots, guessModelTypeFromFilename,
   UNIT_WAYPOINT_SLOTS, EDIFICIO_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260516';
-import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260516';
+} from './waypoints.js?v=20260517';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260517';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -2021,11 +2021,6 @@ function closeModal() {
   pendingImportList = null;
   // Stop iframe load
   const iframe = $('map-iframe'); if (iframe) iframe.src = '';
-  // Tear down Mapbox map (frees WebGL context)
-  if (_mapboxHandle) {
-    try { _mapboxHandle.map.remove(); } catch {}
-    _mapboxHandle = null;
-  }
 }
 
 modalOverlay?.addEventListener('click', (e) => {
@@ -2153,113 +2148,28 @@ document.querySelectorAll('.map-modes .pill[data-map-mode]').forEach((btn) => {
   btn.addEventListener('click', () => loadMapMode(btn.dataset.mapMode));
 });
 
-// ── Mapbox real-environment modal ──────────────────────────────────
-const MAPBOX_TOKEN_KEY = 'bizual_lab_mapbox_token';
-let _mapboxHandle = null;
-
-function getMapboxToken() {
-  return localStorage.getItem(MAPBOX_TOKEN_KEY) || '';
-}
-
-function promptMapboxToken() {
-  const current = getMapboxToken();
-  const t = prompt(
-    'Pegá tu token público de Mapbox (pk.eyJ1...).\n' +
-    'Obtené uno gratis en mapbox.com → Account → Tokens.',
-    current || ''
-  );
-  if (t == null) return null;
-  const trimmed = t.trim();
-  if (!trimmed) {
-    localStorage.removeItem(MAPBOX_TOKEN_KEY);
-    return '';
-  }
-  localStorage.setItem(MAPBOX_TOKEN_KEY, trimmed);
-  return trimmed;
-}
-
-async function openMapboxEnv() {
+// ── Mapbox real-environment full-screen panel ──────────────────────
+// All UI lives in mapbox-env.js (it's a self-contained #env-panel that
+// renders over the viewer). viewer.js only fires the open call.
+$('btn-show-mapbox')?.addEventListener('click', async () => {
   const addr = (addressInput?.value || '').trim();
   if (!addr) {
     addressInput?.focus();
     return;
   }
-  let token = getMapboxToken();
-  if (!token) {
-    token = promptMapboxToken();
-    if (!token) return;
-  }
   if (!currentModelUrl) {
     alert('Cargá un GLB primero — el modelo se va a posicionar en el entorno real.');
     return;
   }
-  $('mapbox-address').textContent = addr;
-  openModal($('modal-mapbox'));
-
-  // Restore persisted slider values BEFORE opening the layer so they're
-  // applied on first paint instead of snapping after.
-  const persistedRot   = parseFloat(localStorage.getItem('bizual_lab_env_rotation') || '0');
-  const persistedScale = parseFloat(localStorage.getItem('bizual_lab_env_scale')    || '1.0');
-  const persistedAlt   = parseFloat(localStorage.getItem('bizual_lab_env_altitude') || '0');
-  if (mbBearing) { mbBearing.value = persistedRot;   $('mapbox-bearing-val').textContent  = `${persistedRot|0}°`; }
-  if (mbScale)   { mbScale.value   = persistedScale; $('mapbox-scale-val').textContent    = persistedScale.toFixed(2); }
-  if (mbAlt)     { mbAlt.value     = persistedAlt;   $('mapbox-altitude-val').textContent = `${persistedAlt} m`; }
-
-  // Lazy-load mapbox module on first use.
+  // Prefer the building shell when the user is currently viewing a tipologia.
+  const modelForEnv = /tipologia/i.test(currentModelUrl)
+    ? currentModelUrl.replace(/tipologia[^/]*\.glb/i, 'Edificio_01_exterior.glb')
+    : currentModelUrl;
   try {
-    const mod = await import('./mapbox-env.js?v=20260516');
-    _mapboxHandle = await mod.openEnvironment({
-      container: $('mapbox-container'),
-      address: addr,
-      modelUrl: currentModelUrl,
-      token,
-      initial: {
-        rotation: persistedRot,
-        scale:    persistedScale,
-        altitude: persistedAlt,
-      },
-    });
+    const mod = await import('./mapbox-env.js?v=20260517');
+    await mod.openEnvPanel(addr, modelForEnv);
   } catch (err) {
     console.error('[mapbox-env] open failed:', err);
-    $('mapbox-container').innerHTML = `<div style="padding:20px;color:#f88;font-size:13px;">Error: ${err.message}</div>`;
+    alert('Error abriendo entorno: ' + err.message);
   }
-}
-
-$('btn-show-mapbox')?.addEventListener('click', openMapboxEnv);
-
-document.querySelectorAll('[data-mapbox-style]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('[data-mapbox-style]').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    _mapboxHandle?.setStyle(btn.dataset.mapboxStyle);
-  });
-});
-
-const mbBearing = $('mapbox-bearing');
-const mbScale   = $('mapbox-scale');
-const mbAlt     = $('mapbox-altitude');
-mbBearing?.addEventListener('input', (e) => {
-  const v = parseFloat(e.target.value);
-  $('mapbox-bearing-val').textContent = `${v|0}°`;
-  _mapboxHandle?.setBearing(v);
-  localStorage.setItem('bizual_lab_env_rotation', String(v));
-});
-mbScale?.addEventListener('input', (e) => {
-  const v = parseFloat(e.target.value);
-  $('mapbox-scale-val').textContent = v.toFixed(2);
-  _mapboxHandle?.setScale(v);
-  localStorage.setItem('bizual_lab_env_scale', String(v));
-});
-mbAlt?.addEventListener('input', (e) => {
-  const v = parseFloat(e.target.value);
-  $('mapbox-altitude-val').textContent = `${v} m`;
-  _mapboxHandle?.setAltitude(v);
-  localStorage.setItem('bizual_lab_env_altitude', String(v));
-});
-
-$('mapbox-set-token')?.addEventListener('click', () => {
-  promptMapboxToken();
-  // Re-open to pick up the new token.
-  closeModal();
-  setTimeout(openMapboxEnv, 200);
 });

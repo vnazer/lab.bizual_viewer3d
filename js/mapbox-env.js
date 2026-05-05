@@ -1,30 +1,39 @@
-// Mapbox GL JS + three.js custom layer to render the GLB inside the real-world
-// environment (3D building footprints + satellite tiles).
+// Mapbox GL JS v3 Standard style + Three.js custom layer.
+// Full-screen panel with the GLB rendered inside the photorealistic 3D city.
+// Reference: https://docs.mapbox.com/mapbox-gl-js/example/add-3d-model/
 //
-// Token: stored in localStorage[bizual_lab_mapbox_token]. Free tier from
-// mapbox.com is plenty for internal lab use.
-//
-// Math notes (the tricky part):
-//   • Mapbox's coordinate system is Mercator with Z-up.
-//   • three.js scenes are Y-up by default.
-//   • Models are auto-centered: base (Y_min) → 0, X/Z midpoints → 0.
-//   • Model scale = 1 meter in Mercator units (provided by Mapbox).
-//   • Rotation around the world vertical: applied IN MODEL SPACE around Y
-//     (the GLB's up axis), then the X-rotation 90° converts Y-up → Z-up.
-//   • render() does NOT call map.triggerRepaint(): Mapbox handles redraws on
-//     its own, and slider setters call triggerRepaint() explicitly.
+// Token: stored in localStorage[bizual_lab_mapbox_token]. First run prompts.
+// Geocoder: OpenStreetMap Nominatim (no API key required).
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
-const MAPBOX_CSS_URL = 'https://api.mapbox.com/mapbox-gl-js/v3.7.0/mapbox-gl.css';
-const MAPBOX_JS_URL  = 'https://api.mapbox.com/mapbox-gl-js/v3.7.0/mapbox-gl.js';
-const DRACO_DECODER  = 'https://www.gstatic.com/draco/v1/decoders/';
+const MAPBOX_VERSION  = '3.11.0';
+const MAPBOX_CSS_URL  = `https://api.mapbox.com/mapbox-gl-js/v${MAPBOX_VERSION}/mapbox-gl.css`;
+const MAPBOX_JS_URL   = `https://api.mapbox.com/mapbox-gl-js/v${MAPBOX_VERSION}/mapbox-gl.js`;
+const DRACO_DECODER   = 'https://www.gstatic.com/draco/v1/decoders/';
+const TOKEN_KEY       = 'bizual_lab_mapbox_token';
+
+const STYLES = {
+  standard:  'mapbox://styles/mapbox/standard',
+  satellite: 'mapbox://styles/mapbox/satellite-streets-v12',
+  streets:   'mapbox://styles/mapbox/streets-v12',
+  dark:      'mapbox://styles/mapbox/dark-v11',
+};
 
 let _mapboxgl = null;
 let _cssInjected = false;
-let _currentMap = null;
+
+// ─── token + script loading ──────────────────────────────────────────
+export function getMapboxToken() {
+  return localStorage.getItem(TOKEN_KEY) || '';
+}
+
+export function setMapboxToken(t) {
+  if (t) localStorage.setItem(TOKEN_KEY, t.trim());
+  else localStorage.removeItem(TOKEN_KEY);
+}
 
 function injectCSS() {
   if (_cssInjected) return;
@@ -35,26 +44,31 @@ function injectCSS() {
   _cssInjected = true;
 }
 
-function loadMapboxScript() {
-  if (_mapboxgl) return Promise.resolve(_mapboxgl);
-  if (window.mapboxgl) { _mapboxgl = window.mapboxgl; return Promise.resolve(_mapboxgl); }
+async function ensureMapbox() {
+  if (_mapboxgl) return _mapboxgl;
+  if (window.mapboxgl) { _mapboxgl = window.mapboxgl; return _mapboxgl; }
   injectCSS();
-  return new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = MAPBOX_JS_URL;
-    s.onload = () => { _mapboxgl = window.mapboxgl; resolve(_mapboxgl); };
+    s.onload = resolve;
     s.onerror = () => reject(new Error('No se pudo cargar Mapbox GL JS'));
     document.head.appendChild(s);
   });
+  _mapboxgl = window.mapboxgl;
+  return _mapboxgl;
 }
 
-// Geocode via OpenStreetMap Nominatim — free, no key required.
-export async function geocodeAddress(address) {
-  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=cl,ar,uy,pe,co,mx,es`;
+// ─── geocoder (OSM Nominatim) ─────────────────────────────────────────
+export async function geocodeAddress(rawAddress) {
+  const query = /chile|argentina|uruguay|peru|perú|méxico|mexico|colombia|españa|spain/i.test(rawAddress)
+    ? rawAddress
+    : rawAddress + ', Chile';
+  const url = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(query) + '&format=json&limit=1';
   const res = await fetch(url, { headers: { 'Accept-Language': 'es' } });
   if (!res.ok) throw new Error(`Geocoder HTTP ${res.status}`);
   const data = await res.json();
-  if (!data.length) throw new Error('Dirección no encontrada. Probá con: Calle 123, Ciudad, País');
+  if (!data.length) throw new Error('Dirección no encontrada. Probá: Calle 123, Ciudad');
   return {
     lat: parseFloat(data[0].lat),
     lon: parseFloat(data[0].lon),
@@ -62,82 +76,68 @@ export async function geocodeAddress(address) {
   };
 }
 
-// Build the three.js custom layer for Mapbox.
-function createModelLayer({ lng, lat, modelUrl, onModelReady }) {
-  const modelOrigin = [lng, lat];
-  const modelAltitudeBase = 0;
+// ─── three.js custom layer ────────────────────────────────────────────
+function createModelLayer(lng, lat, glbUrl, initial = {}) {
+  let rotDeg  = initial.rotation ?? 0;
+  let scaleMx = initial.scale    ?? 1.0;
+  let altM    = initial.altitude ?? 0;
 
-  // Mutable state (driven by sliders).
-  let rotationDeg = 0;       // building heading (0–360°)
-  let scaleBonus = 1.0;      // fine-tuning factor; 1.0 = real-world meters
-  let altOffset = 0;         // meters above ground (compensate slope)
-
-  let renderer, scene, camera, model;
+  let camera, scene, renderer, model;
   let mapRef = null;
-  let metersToMercator = 1;
-  let mercator = null;
 
-  // Reusable matrices/vectors to avoid GC pressure on every frame.
-  const _xRot = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
-  const _yRot = new THREE.Matrix4();
-  const _scale = new THREE.Vector3();
-  const _xform = new THREE.Matrix4();
-  const _proj = new THREE.Matrix4();
+  // Pre-compute Mercator scale at this latitude (constant within ~one city).
+  const mercatorOrigin = _mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
+  const metersToMercator = mercatorOrigin.meterInMercatorCoordinateUnits();
 
-  const layer = {
+  return {
     id: 'bizual-model',
     type: 'custom',
     renderingMode: '3d',
 
-    // Public API for sliders.
-    setRotation(deg)  { rotationDeg = deg; mapRef?.triggerRepaint(); },
-    setScale(s)       { scaleBonus = s;    mapRef?.triggerRepaint(); },
-    setAltOffset(m)   { altOffset = m;     mapRef?.triggerRepaint(); },
-    getModelBox()     { return model ? new THREE.Box3().setFromObject(model) : null; },
+    setRotation(deg) { rotDeg = deg; mapRef?.triggerRepaint(); },
+    setScale(s)      { scaleMx = Math.max(0.01, s); mapRef?.triggerRepaint(); },
+    setAltitude(m)   { altM = m; mapRef?.triggerRepaint(); },
+    getModel()       { return model; },
 
     onAdd(map, gl) {
       mapRef = map;
       camera = new THREE.Camera();
       scene = new THREE.Scene();
+
+      // 3-light setup matching the official Mapbox example.
       scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-      const sun = new THREE.DirectionalLight(0xfff4e5, 1.2);
-      sun.position.set(10, 20, 10);
-      scene.add(sun);
+      const d1 = new THREE.DirectionalLight(0xfff4e5, 1.1);
+      d1.position.set(0, -70, 100).normalize();
+      scene.add(d1);
+      const d2 = new THREE.DirectionalLight(0xc8d8e0, 0.5);
+      d2.position.set(0, 70, 100).normalize();
+      scene.add(d2);
 
-      mercator = _mapboxgl.MercatorCoordinate.fromLngLat(modelOrigin, modelAltitudeBase);
-      metersToMercator = mercator.meterInMercatorCoordinateUnits();
-
-      const loader = new GLTFLoader();
       const draco = new DRACOLoader();
       draco.setDecoderPath(DRACO_DECODER);
       draco.setDecoderConfig({ type: 'js' });
+      const loader = new GLTFLoader();
       loader.setDRACOLoader(draco);
 
       loader.load(
-        modelUrl,
+        glbUrl,
         (gltf) => {
           model = gltf.scene;
 
-          // Auto-center: base at Y=0, X/Z mid at 0. Important — GLBs from
-          // gltf-transform sometimes have origins offset from the building base.
+          // Auto-center: base at Y=0, X/Z midpoints at 0.
           const box = new THREE.Box3().setFromObject(model);
           const size = box.getSize(new THREE.Vector3());
           const center = box.getCenter(new THREE.Vector3());
           model.position.set(-center.x, -box.min.y, -center.z);
-          model.updateMatrixWorld();
+          model.updateMatrixWorld(true);
           scene.add(model);
 
-          // Heuristic check: if Y-size < 5m, model is probably in cm — flag it.
           const isLikelyCm = size.y < 5 && size.x < 5 && size.z < 5;
-          window.__modelBBox = { box, size, center, isLikelyCm };
-
-          console.log('[mapbox-env] model loaded:', {
-            sizeM: { x: +size.x.toFixed(1), y: +size.y.toFixed(1), z: +size.z.toFixed(1) },
-            metersToMercator,
-            isLikelyCm,
-          });
-
-          if (onModelReady) onModelReady({ box, size, center, isLikelyCm });
+          window.__mapboxModel = { model, box, size, isLikelyCm };
+          console.log('[Bizual Entorno] Modelo cargado');
+          console.log(`  Dimensiones reales: ${size.x.toFixed(1)}m × ${size.y.toFixed(1)}m × ${size.z.toFixed(1)}m`);
+          console.log(`  Factor escala Mercator: ${metersToMercator.toExponential(3)}`);
+          if (isLikelyCm) console.warn('  ⚠ Modelo parece estar en cm, no en metros — ajustá la Escala a ~100×');
           mapRef.triggerRepaint();
         },
         undefined,
@@ -154,123 +154,215 @@ function createModelLayer({ lng, lat, modelUrl, onModelReady }) {
     },
 
     render(gl, matrix) {
-      if (!model || !mercator) return;
+      if (!model) return;
+      const origin = _mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], altM);
+      const scale = metersToMercator * scaleMx;
 
-      // Re-derive Mercator with current altitude offset (matters for terrains
-      // with slope — the GLB base sits at modelAltitudeBase + altOffset).
-      const m = _mapboxgl.MercatorCoordinate.fromLngLat(modelOrigin, modelAltitudeBase + altOffset);
+      // Three.js Y-up → Mapbox Z-up, then heading rotation around Y (model space).
+      const rotX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+      const rotY = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 1, 0), rotDeg * Math.PI / 180);
+      const xform = new THREE.Matrix4()
+        .makeTranslation(origin.x, origin.y, origin.z)
+        .scale(new THREE.Vector3(scale, -scale, scale))
+        .multiply(rotX)
+        .multiply(rotY);
 
-      const scale = metersToMercator * scaleBonus;
-      _scale.set(scale, -scale, scale); // negate Y to flip handedness for Mapbox
-
-      // Building heading: rotate around the model's Y axis BEFORE the Y→Z-up
-      // flip. After the flip, that rotation maps to a rotation around world Z
-      // (vertical), which is what we want.
-      _yRot.makeRotationAxis(new THREE.Vector3(0, 1, 0), rotationDeg * Math.PI / 180);
-
-      _xform
-        .makeTranslation(m.x, m.y, m.z)
-        .scale(_scale)
-        .multiply(_xRot)
-        .multiply(_yRot);
-
-      // Mapbox supplies the combined view-projection matrix; we post-multiply
-      // by our local transform to get the final clip-space matrix.
-      _proj.fromArray(matrix).multiply(_xform);
-      camera.projectionMatrix.copy(_proj);
-      camera.projectionMatrixInverse.copy(_proj).invert();
+      camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix).multiply(xform);
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
 
       renderer.resetState();
       renderer.render(scene, camera);
-      // No triggerRepaint here — Mapbox already repaints on view change /
-      // explicit triggerRepaint calls from slider setters.
+      // No triggerRepaint here — Mapbox repaints on view change; setters
+      // trigger explicitly when sliders move.
     },
   };
-
-  return layer;
 }
 
-export async function openEnvironment({ container, address, modelUrl, token, initial = {} }) {
-  if (!token) throw new Error('Falta token de Mapbox');
-  await loadMapboxScript();
+// ─── full-screen panel (open / close) ─────────────────────────────────
+let _activePanel = null;
+let _activeMap   = null;
+let _activeLayer = null;
+
+export async function openEnvPanel(address, modelUrl, opts = {}) {
+  if (!address?.trim()) {
+    alert('Ingresá una dirección antes de ver el entorno');
+    return null;
+  }
+
+  let token = getMapboxToken();
+  if (!token) {
+    token = (prompt('Token público de Mapbox (pk.eyJ1...)\nObtenelo en mapbox.com → Account → Tokens', '') || '').trim();
+    if (!token) return null;
+    setMapboxToken(token);
+  }
+
+  // Geocode first — fail fast if address is bad.
+  let coords;
+  try {
+    coords = await geocodeAddress(address);
+  } catch (err) {
+    alert('No se encontró la dirección. Probá: "Av. Libertad 123, Viña del Mar"');
+    return null;
+  }
+
+  await ensureMapbox();
   _mapboxgl.accessToken = token;
 
-  const coords = await geocodeAddress(address);
-  container.innerHTML = '';
+  // Persisted slider values (defaults: 0 / 1 / 0)
+  const savedRot   = parseFloat(localStorage.getItem('bizual_env_rot')   ?? '0');
+  const savedScale = parseFloat(localStorage.getItem('bizual_env_scale') ?? '1');
+  const savedAlt   = parseFloat(localStorage.getItem('bizual_env_alt')   ?? '0');
+
+  closeEnvPanel(); // remove any existing
+
+  const panel = document.createElement('div');
+  panel.id = 'env-panel';
+  panel.innerHTML = `
+    <div class="env-header">
+      <div class="env-title">
+        <span class="env-pin">📍</span>
+        <span class="env-address">${escapeHtml(coords.display.split(',').slice(0, 2).join(',').trim())}</span>
+      </div>
+      <div class="env-style-btns">
+        <button class="env-style active" data-style="standard"  title="Edificios 3D fotorealistas">🏙️ 3D</button>
+        <button class="env-style"        data-style="satellite" title="Vista satelital">🛰️ Satélite</button>
+        <button class="env-style"        data-style="streets"   title="Mapa de calles">🗺️ Calles</button>
+        <button class="env-style"        data-style="dark"      title="Modo oscuro">🌙 Noche</button>
+      </div>
+      <button class="env-close" title="Cerrar (Esc)">✕</button>
+    </div>
+
+    <div id="mapbox-container"></div>
+
+    <div class="env-controls">
+      <div class="env-slider-group">
+        <label>🔄 Rotación edificio</label>
+        <input type="range" id="s-rot"   min="0"   max="360" step="1"    value="${savedRot}">
+        <span class="env-val" id="v-rot">${savedRot.toFixed(0)}°</span>
+      </div>
+      <div class="env-slider-group">
+        <label>📐 Escala fina <small>(1.0 = real)</small></label>
+        <input type="range" id="s-scale" min="0.1" max="3"   step="0.05" value="${savedScale}">
+        <span class="env-val" id="v-scale">${savedScale.toFixed(2)}×</span>
+      </div>
+      <div class="env-slider-group">
+        <label>↕️ Altura offset <small>(terreno con pendiente)</small></label>
+        <input type="range" id="s-alt"   min="-5"  max="20"  step="0.5"  value="${savedAlt}">
+        <span class="env-val" id="v-alt">${savedAlt.toFixed(1)} m</span>
+      </div>
+      <button class="env-save-btn" id="btn-save-env">💾 Guardar ajustes</button>
+      <button class="env-token-btn" id="btn-token-env" title="Cambiar token Mapbox">🔑</button>
+    </div>
+  `;
+  document.body.appendChild(panel);
+  _activePanel = panel;
 
   const map = new _mapboxgl.Map({
-    container,
-    style: 'mapbox://styles/mapbox/satellite-streets-v12',
+    container: 'mapbox-container',
+    style: STYLES.standard, // photorealistic 3D city
     center: [coords.lon, coords.lat],
-    zoom: 17,
-    pitch: 55,
+    zoom: 17.5,
+    pitch: 60,
     bearing: -20,
     antialias: true,
   });
+  _activeMap = map;
+  window.__envMap = map;
+  window.__envCoord = coords;
 
-  _currentMap = map;
-  let layerHandle = null;
+  // Marker at the geocoded point.
+  new _mapboxgl.Marker({ color: '#0066ff' })
+    .setLngLat([coords.lon, coords.lat])
+    .addTo(map);
 
-  await new Promise((resolve) => map.on('load', resolve));
+  // Navigation control (rotation + pitch).
+  map.addControl(new _mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
 
-  // 3D building footprints from Mapbox itself.
-  try {
-    map.addLayer({
-      id: 'mapbox-buildings-3d',
-      source: 'composite',
-      'source-layer': 'building',
-      filter: ['==', 'extrude', 'true'],
-      type: 'fill-extrusion',
-      minzoom: 15,
-      paint: {
-        'fill-extrusion-color': '#aab',
-        'fill-extrusion-height': ['get', 'height'],
-        'fill-extrusion-base': ['get', 'min_height'],
-        'fill-extrusion-opacity': 0.65,
-      },
+  // Add custom layer once style finishes loading. Re-runs on style swap.
+  function attachLayer() {
+    // Configure Standard style (only valid for the "standard" style).
+    try {
+      map.setConfigProperty('basemap', 'showPlaceLabels', true);
+      map.setConfigProperty('basemap', 'showPointOfInterestLabels', false);
+      map.setConfigProperty('basemap', 'show3dObjects', true);
+    } catch { /* not standard style */ }
+    if (map.getLayer('bizual-model')) return; // already there
+    _activeLayer = createModelLayer(coords.lon, coords.lat, modelUrl, {
+      rotation: parseFloat(panel.querySelector('#s-rot').value),
+      scale:    parseFloat(panel.querySelector('#s-scale').value),
+      altitude: parseFloat(panel.querySelector('#s-alt').value),
     });
-  } catch (e) { /* style may not include building source — ignore */ }
+    map.addLayer(_activeLayer);
+  }
+  map.on('style.load', attachLayer);
 
-  layerHandle = createModelLayer({
-    lng: coords.lon,
-    lat: coords.lat,
-    modelUrl,
-    onModelReady: ({ size, isLikelyCm }) => {
-      // FlyTo once we know where the building actually is — gentle re-frame.
-      map.flyTo({
-        center: [coords.lon, coords.lat],
-        zoom: 17,
-        pitch: 55,
-        bearing: -20 + (initial.rotation || 0),
-        duration: 1500,
-      });
-      // If the GLB is in cm (size < 5m), nudge the user via console.
-      if (isLikelyCm) {
-        console.warn('[mapbox-env] modelo parece estar en cm, no en metros — subí Escala a ~100×');
-      }
-    },
+  // Sliders → live update layer + persist
+  bindSlider(panel, '#s-rot',   '#v-rot',   0, '°',  (v) => { _activeLayer?.setRotation(v); localStorage.setItem('bizual_env_rot',   String(v)); });
+  bindSlider(panel, '#s-scale', '#v-scale', 2, '×',  (v) => { _activeLayer?.setScale(v);    localStorage.setItem('bizual_env_scale', String(v)); });
+  bindSlider(panel, '#s-alt',   '#v-alt',   1, ' m', (v) => { _activeLayer?.setAltitude(v); localStorage.setItem('bizual_env_alt',   String(v)); });
+
+  // "Guardar ajustes" — explicit feedback (sliders already auto-save).
+  panel.querySelector('#btn-save-env')?.addEventListener('click', (e) => {
+    const btn = e.currentTarget;
+    btn.textContent = '✅ Guardado';
+    setTimeout(() => { btn.textContent = '💾 Guardar ajustes'; }, 1500);
   });
-  map.addLayer(layerHandle);
 
-  // Apply persisted/initial values.
-  if (initial.rotation != null) layerHandle.setRotation(initial.rotation);
-  if (initial.scale    != null) layerHandle.setScale(initial.scale);
-  if (initial.altitude != null) layerHandle.setAltOffset(initial.altitude);
+  // Re-prompt token
+  panel.querySelector('#btn-token-env')?.addEventListener('click', () => {
+    const t = (prompt('Token público de Mapbox', getMapboxToken() || '') || '').trim();
+    if (!t) return;
+    setMapboxToken(t);
+    closeEnvPanel();
+    setTimeout(() => openEnvPanel(address, modelUrl, opts), 200);
+  });
 
-  return {
-    map,
-    coords,
-    setStyle:    (styleId) => map.setStyle(`mapbox://styles/mapbox/${styleId}`),
-    setBearing:  (d) => layerHandle.setRotation(d),
-    setScale:    (s) => layerHandle.setScale(s),
-    setAltitude: (a) => layerHandle.setAltOffset(a),
-    getModelBox: () => layerHandle.getModelBox(),
-  };
+  // Style switcher
+  panel.querySelectorAll('.env-style').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      panel.querySelectorAll('.env-style').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      _activeLayer = null; // setStyle drops layers; attachLayer recreates on style.load
+      map.setStyle(STYLES[btn.dataset.style]);
+    });
+  });
+
+  // Close button + Esc
+  panel.querySelector('.env-close')?.addEventListener('click', closeEnvPanel);
+  const escHandler = (e) => { if (e.key === 'Escape') closeEnvPanel(); };
+  document.addEventListener('keydown', escHandler);
+  panel._escHandler = escHandler;
+
+  return { map, coords };
 }
 
-export function closeEnvironment() {
-  if (_currentMap) {
-    try { _currentMap.remove(); } catch {}
-    _currentMap = null;
+export function closeEnvPanel() {
+  if (_activeMap) { try { _activeMap.remove(); } catch {} _activeMap = null; }
+  if (_activePanel) {
+    if (_activePanel._escHandler) document.removeEventListener('keydown', _activePanel._escHandler);
+    _activePanel.remove();
+    _activePanel = null;
   }
+  _activeLayer = null;
+  window.__envMap = null;
+  window.__envCoord = null;
+}
+
+// Public so console / external code can close it (replaces the global hack).
+window.closeEnvPanel = closeEnvPanel;
+
+// ─── helpers ─────────────────────────────────────────────────────────
+function bindSlider(root, inputSel, valSel, decimals, unit, onChange) {
+  const input = root.querySelector(inputSel);
+  const out = root.querySelector(valSel);
+  if (!input) return;
+  input.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    if (out) out.textContent = v.toFixed(decimals) + unit;
+    onChange(v);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }

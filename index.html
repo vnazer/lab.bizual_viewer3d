@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260516" />
+  <link rel="stylesheet" href="./css/style.css?v=20260517" />
   <script type="importmap">
   {
     "imports": {
@@ -369,40 +369,6 @@
       </div>
     </div>
 
-    <!-- Mapbox real environment modal -->
-    <div id="modal-mapbox" class="modal hidden modal-large">
-      <div class="modal-head">
-        <strong>Entorno real: <span id="mapbox-address"></span></strong>
-        <div class="map-modes">
-          <button class="pill active" data-mapbox-style="satellite-streets-v12">🛰️ Satélite</button>
-          <button class="pill" data-mapbox-style="streets-v12">🗺️ Mapa</button>
-          <button class="pill" data-mapbox-style="dark-v11">🌙 Oscuro</button>
-        </div>
-        <button class="modal-close" data-close>×</button>
-      </div>
-      <div class="modal-body modal-body-flush" style="flex-direction:column;">
-        <div id="mapbox-container" style="flex:1; min-height:55vh;"></div>
-        <div class="mapbox-tools">
-          <label>
-            <span>Rotación</span>
-            <input type="range" id="mapbox-bearing" min="0" max="360" step="1" value="0" />
-            <output id="mapbox-bearing-val">0°</output>
-          </label>
-          <label>
-            <span>Escala</span>
-            <input type="range" id="mapbox-scale" min="0.1" max="3.0" step="0.05" value="1.0" />
-            <output id="mapbox-scale-val">1.00</output>
-          </label>
-          <label>
-            <span>Altura</span>
-            <input type="range" id="mapbox-altitude" min="-10" max="60" step="0.5" value="0" />
-            <output id="mapbox-altitude-val">0 m</output>
-          </label>
-          <button id="mapbox-set-token" class="modal-btn-secondary">🔑 Cambiar token</button>
-        </div>
-      </div>
-    </div>
-
     <!-- Map embed modal -->
     <div id="modal-map" class="modal hidden modal-large">
       <div class="modal-head">
@@ -420,6 +386,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260516"></script>
+  <script type="module" src="./js/viewer.js?v=20260517"></script>
 </body>
 </html>
