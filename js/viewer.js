@@ -6,14 +6,14 @@ import {
   HDRI_PRESETS, DEFAULT_HDRI_ID,
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260507';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260507';
+} from './scene.js?v=20260508';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260508';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
   loadWaypointsForFile, saveWaypointsForFile, clearWaypointsForFile,
   formatWaypointJSON, parseWaypointJSON, UNIT_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260507';
+} from './waypoints.js?v=20260508';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -254,21 +254,48 @@ renderer.toneMappingExposure = persistedExposure;
 scene.environmentIntensity = persistedEnvIntensity;
 window.__envIntensity = persistedEnvIntensity;
 
-// Show max anisotropy capability up front.
+// Anisotropy: 4 pill buttons (1× / 4× / 8× / 16×). Default 8×, capped at GPU max.
 const maxAniso = renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
+// Migrate previous key 'aniso' → 'anisotropy'. Default 8× (was 16×).
+const _legacy = ls.get('aniso', null);
+let anisoValue = ls.get('anisotropy', _legacy != null ? _legacy : 8);
+anisoValue = Math.min(maxAniso, Math.max(1, anisoValue));
+
 const anisoEl = $('aniso-max');
-function updateAnisoMaxLabel() {
-  if (anisoEl) anisoEl.textContent = `${anisoValue}× / max ${maxAniso}×`;
+const anisoCapHint = $('aniso-cap-hint');
+
+function updateAnisoLabels() {
+  // Stats line: "8× (sel) / 16× (gpu max)"
+  if (anisoEl) anisoEl.textContent = `${anisoValue}× (sel) / ${maxAniso}× (gpu)`;
+  // Hint under the pills: only show when something interesting is happening.
+  if (anisoCapHint) {
+    if (anisoValue < maxAniso) anisoCapHint.textContent = `Seleccionado ${anisoValue}× · GPU soporta hasta ${maxAniso}×`;
+    else if (anisoValue === maxAniso) anisoCapHint.textContent = `${maxAniso}× = máximo de la GPU`;
+    else anisoCapHint.textContent = '';
+  }
 }
 
-// User-selected anisotropy. Persisted. Capped at hw max.
-let anisoValue = Math.min(maxAniso, ls.get('aniso', 16));
-const anisoSelect = $('aniso-select');
-if (anisoSelect) {
-  anisoSelect.value = String(anisoValue);
-  anisoSelect.addEventListener('change', (e) => {
-    anisoValue = Math.min(maxAniso, parseInt(e.target.value, 10) || 16);
-    ls.set('aniso', anisoValue);
+function syncAnisoPills() {
+  document.querySelectorAll('#aniso-pills .pill').forEach((btn) => {
+    const v = parseInt(btn.dataset.aniso, 10);
+    btn.classList.toggle('active', v === anisoValue);
+    // Disable pills above GPU max so the user sees the hardware ceiling.
+    if (v > maxAniso) {
+      btn.disabled = true;
+      btn.title = `No soportado — GPU máx ${maxAniso}×`;
+    } else {
+      btn.disabled = false;
+      btn.title = `${v}× anisotropic filtering`;
+    }
+  });
+}
+
+document.querySelectorAll('#aniso-pills .pill').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    const requested = parseInt(btn.dataset.aniso, 10);
+    anisoValue = Math.min(maxAniso, Math.max(1, requested));
+    ls.set('anisotropy', anisoValue);
     if (currentModel) {
       const r = applyAnisotropy(currentModel, renderer, anisoValue);
       // Re-run VRAM calc so the operator can see the (lack of) change in real time.
@@ -277,10 +304,13 @@ if (anisoSelect) {
       $('vram').textContent = formatBytes(vram.bytes);
       console.log(`[lab] anisotropy → ${r.applied}× (${r.slotsTouched} texture slots updated)`);
     }
-    updateAnisoMaxLabel();
+    syncAnisoPills();
+    updateAnisoLabels();
   });
-}
-updateAnisoMaxLabel();
+});
+
+syncAnisoPills();
+updateAnisoLabels();
 
 // Populate HDRI preset dropdown from scene.js export.
 const hdriSelect = $('hdri-preset');

@@ -458,6 +458,40 @@ button:hover { background: rgba(102, 204, 255, 0.25); }
 body.nav-fps #canvas-wrap canvas { cursor: none; }
 body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
 
+/* pill-group: 4 inline radio-style buttons */
+.pill-group {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.pill-group .pill {
+  flex: 1;
+  margin: 0;
+  padding: 6px 0;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--panel-border);
+  color: var(--muted);
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 100ms, background 100ms, color 100ms;
+}
+.pill-group .pill:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.pill-group .pill.active {
+  background: rgba(102, 204, 255, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pill-group .pill[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 /* views / waypoints panel */
 .views-section { margin: 8px 0 4px; }
 .row.label-only > span:first-child { margin-bottom: 4px; }
