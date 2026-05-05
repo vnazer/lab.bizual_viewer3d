@@ -4,12 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260504" />
+  <link rel="stylesheet" href="./css/style.css?v=20260505" />
   <script type="importmap">
   {
     "imports": {
       "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/"
+      "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/",
+      "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.8/build/index.module.js"
     }
   }
   </script>
@@ -40,6 +41,38 @@
         <small class="hint">Máx <strong>100 MB</strong> · .glb · .gltf · .ktx2 · .bin</small>
         <input type="file" id="file-input" accept=".glb,.gltf,.ktx2,.bin" multiple style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" />
       </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Navegación <span id="nav-mode-badge" class="badge">Exterior</span></summary>
+      <div class="nav-mode-row">
+        <label class="nav-mode active" data-mode="orbit">
+          <input type="radio" name="nav-mode" value="orbit" checked />
+          <span class="nav-mode-icon">🌐</span>
+          <span class="nav-mode-label">Exterior <small>[E]</small></span>
+        </label>
+        <label class="nav-mode" data-mode="fps">
+          <input type="radio" name="nav-mode" value="fps" />
+          <span class="nav-mode-icon">🚶</span>
+          <span class="nav-mode-label">Interior <small>[I]</small></span>
+        </label>
+      </div>
+      <label class="row slider">
+        <span>Velocidad</span>
+        <input type="range" id="nav-speed" min="0.5" max="5.0" step="0.1" value="2.0" />
+        <output id="nav-speed-val">2.0</output>
+      </label>
+      <label class="row slider">
+        <span>Altura cámara</span>
+        <input type="range" id="nav-eye-height" min="0.5" max="2.5" step="0.05" value="1.65" />
+        <output id="nav-eye-height-val">1.65</output>
+      </label>
+      <label class="row checkbox">
+        <input type="checkbox" id="nav-gravity" />
+        <span>Gravedad activa</span>
+      </label>
+      <button id="btn-enter-model" class="primary-btn">🚪 Entrar al modelo</button>
+      <small class="hint" id="nav-hint">WASD = mover · Mouse = mirar · Shift = correr · Space/Ctrl = subir/bajar · Esc = soltar mouse</small>
     </details>
 
     <details class="panel" open>
@@ -137,12 +170,14 @@
     </div>
   </div>
 
+  <div id="fps-crosshair" class="hidden">+</div>
+
   <div id="upload-progress" class="hidden">
     <div class="up-name"></div>
     <div class="up-bar"><div class="up-fill"></div></div>
     <div class="up-pct">0%</div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260504"></script>
+  <script type="module" src="./js/viewer.js?v=20260505"></script>
 </body>
 </html>

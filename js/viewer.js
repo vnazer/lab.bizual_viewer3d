@@ -6,7 +6,8 @@ import {
   HDRI_PRESETS, DEFAULT_HDRI_ID,
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260504';
+} from './scene.js?v=20260505';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260505';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -46,6 +47,65 @@ const loader = getGLTFLoader(renderer);
 window.__camera = camera;
 window.__controls = controls;
 console.log('[lab] globals ready:', { renderer: !!window.__renderer, scene: !!window.__scene, sun: !!window.__sunLight, ambient: !!window.__ambientLight });
+
+// First-person controller (lazy-enabled when user switches mode).
+const fpsController = new FirstPersonController(camera, renderer.domElement);
+window.__fps = fpsController;
+
+const persistedNavMode = ls.get('navMode', 'orbit');
+const persistedNavSpeed = ls.get('navSpeed', 2.0);
+const persistedEyeHeight = ls.get('navEyeHeight', 1.65);
+const persistedGravity = ls.get('navGravity', false);
+fpsController.setSpeed(persistedNavSpeed);
+fpsController.setEyeHeight(persistedEyeHeight);
+fpsController.setGravity(persistedGravity);
+
+// Camera pose snapshot — restore when switching back to orbit.
+let _orbitSnapshot = null;
+function snapshotOrbit() {
+  _orbitSnapshot = {
+    pos: camera.position.clone(),
+    target: controls.target.clone(),
+    quat: camera.quaternion.clone(),
+  };
+}
+function restoreOrbit() {
+  if (!_orbitSnapshot) return;
+  camera.position.copy(_orbitSnapshot.pos);
+  camera.quaternion.copy(_orbitSnapshot.quat);
+  controls.target.copy(_orbitSnapshot.target);
+  controls.update();
+}
+
+let navMode = 'orbit';
+function setNavMode(mode, { fromUser = true } = {}) {
+  if (mode === navMode) return;
+  if (mode === 'fps') {
+    snapshotOrbit();
+    controls.enabled = false;
+    fpsController.setCollisionRoot(currentModel);
+    fpsController.enable();
+    document.body.classList.add('nav-fps');
+    $('fps-crosshair')?.classList.remove('hidden');
+  } else {
+    fpsController.disable();
+    document.body.classList.remove('nav-fps');
+    $('fps-crosshair')?.classList.add('hidden');
+    controls.enabled = true;
+    if (fromUser) restoreOrbit();
+  }
+  navMode = mode;
+  ls.set('navMode', mode);
+  // Sync UI radios
+  document.querySelectorAll('.nav-mode').forEach((el) => {
+    el.classList.toggle('active', el.dataset.mode === mode);
+    const input = el.querySelector('input');
+    if (input) input.checked = (input.value === mode);
+  });
+  const badge = $('nav-mode-badge');
+  if (badge) badge.textContent = mode === 'fps' ? 'Interior' : 'Exterior';
+}
+window.__setNavMode = setNavMode;
 
 let envTex = null;
 let currentModel = null;
@@ -156,6 +216,7 @@ async function loadModel(url) {
   showLoading(true);
   try {
     if (currentModel) {
+      disposeBVH(currentModel);
       scene.remove(currentModel);
       disposeObject(currentModel);
       currentModel = null;
@@ -168,9 +229,12 @@ async function loadModel(url) {
     const root = gltf.scene || gltf.scenes[0];
     enableShadows(root);
     applyAnisotropy(root, renderer);
+    const bvh = setupBVH(root);
     scene.add(root);
     currentModel = root;
     currentGLTF = gltf;
+    fpsController.setCollisionRoot(root);
+    if (bvh.available) console.log(`[lab] BVH built for ${bvh.meshes} meshes`);
     window.__currentModel = root;
     window.__currentGLTF = gltf;
     frameObject(root, camera, controls);
@@ -421,6 +485,93 @@ if (isolateClearBtn) {
   });
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Navigation panel wiring (Exterior / Interior toggle, FPS controls)
+// ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('input[name="nav-mode"]').forEach((input) => {
+  input.addEventListener('change', (e) => {
+    if (e.target.checked) setNavMode(e.target.value);
+  });
+});
+
+const navSpeedInput = $('nav-speed');
+const navSpeedOut = $('nav-speed-val');
+if (navSpeedInput) {
+  navSpeedInput.value = persistedNavSpeed;
+  if (navSpeedOut) navSpeedOut.textContent = persistedNavSpeed.toFixed(1);
+  navSpeedInput.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    fpsController.setSpeed(v);
+    if (navSpeedOut) navSpeedOut.textContent = v.toFixed(1);
+    ls.set('navSpeed', v);
+  });
+}
+
+const eyeHeightInput = $('nav-eye-height');
+const eyeHeightOut = $('nav-eye-height-val');
+if (eyeHeightInput) {
+  eyeHeightInput.value = persistedEyeHeight;
+  if (eyeHeightOut) eyeHeightOut.textContent = persistedEyeHeight.toFixed(2);
+  eyeHeightInput.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    fpsController.setEyeHeight(v);
+    if (eyeHeightOut) eyeHeightOut.textContent = v.toFixed(2);
+    ls.set('navEyeHeight', v);
+  });
+}
+
+const navGravity = $('nav-gravity');
+if (navGravity) {
+  navGravity.checked = persistedGravity;
+  navGravity.addEventListener('change', (e) => {
+    fpsController.setGravity(e.target.checked);
+    ls.set('navGravity', e.target.checked);
+  });
+}
+
+const enterBtn = $('btn-enter-model');
+if (enterBtn) {
+  enterBtn.addEventListener('click', () => {
+    if (!currentModel) return;
+    setNavMode('fps', { fromUser: false });
+    // Defer one tick so the FPS controller is fully enabled before lock+pose.
+    requestAnimationFrame(() => fpsController.enterModel(currentModel, { lockPointer: true }));
+  });
+}
+
+// Keyboard shortcuts: E = exterior, I = interior. Don't fire from inputs.
+window.addEventListener('keydown', (e) => {
+  const tag = (e.target?.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'e' || e.key === 'E') setNavMode('orbit');
+  else if (e.key === 'i' || e.key === 'I') setNavMode('fps');
+});
+
+// Apply persisted nav mode AFTER first model loads so collision root is set.
+// (We can't be in FPS without a model, so guard inside loadModel completion.)
+const _origPopulate = populateModels;
+async function populateModelsAndApplyNav() {
+  await _origPopulate();
+  if (persistedNavMode === 'fps' && currentModel) {
+    setNavMode('fps', { fromUser: false });
+  }
+}
+// Note: populateModels is already invoked above. We don't re-run it here;
+// instead, we apply persisted FPS mode lazily once model is in place.
+// Hook into loadModel completion via a one-shot watcher:
+let _navInitialized = false;
+const _checkNavInit = () => {
+  if (_navInitialized || !currentModel) return;
+  _navInitialized = true;
+  if (persistedNavMode === 'fps') setNavMode('fps', { fromUser: false });
+};
+const _origAnimate = animate;
+// Lightweight: poll once per second until model exists.
+const _navPoll = setInterval(() => {
+  if (currentModel) { _checkNavInit(); clearInterval(_navPoll); }
+}, 250);
+
 // Custom HDRI upload
 $('btn-hdri').addEventListener('click', () => $('hdri-input').click());
 $('hdri-input').addEventListener('change', async (e) => {
@@ -468,8 +619,16 @@ function updateFPS() {
   }
 }
 
+let _lastFrameT = performance.now();
 function animate() {
-  controls.update();
+  const now = performance.now();
+  const delta = Math.min(0.1, (now - _lastFrameT) / 1000); // clamp big jumps (tab switch)
+  _lastFrameT = now;
+  if (navMode === 'fps') {
+    fpsController.update(delta);
+  } else {
+    controls.update();
+  }
   // WebGPURenderer exposes renderAsync; WebGLRenderer uses render
   if (typeof renderer.renderAsync === 'function') {
     renderer.renderAsync(scene, camera);
