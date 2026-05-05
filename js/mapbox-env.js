@@ -8,6 +8,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260518';
+import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260518';
 
 const MAPBOX_VERSION  = '3.11.0';
 const MAPBOX_CSS_URL  = `https://api.mapbox.com/mapbox-gl-js/v${MAPBOX_VERSION}/mapbox-gl.css`;
@@ -16,11 +19,39 @@ const DRACO_DECODER   = 'https://www.gstatic.com/draco/v1/decoders/';
 const TOKEN_KEY       = 'bizual_lab_mapbox_token';
 
 const STYLES = {
-  standard:  'mapbox://styles/mapbox/standard',
   satellite: 'mapbox://styles/mapbox/satellite-streets-v12',
+  standard:  'mapbox://styles/mapbox/standard',
   streets:   'mapbox://styles/mapbox/streets-v12',
   dark:      'mapbox://styles/mapbox/dark-v11',
 };
+
+// Mirror of HDRI_PRESETS in scene.js — kept here to avoid pulling all of
+// scene.js (which expects a viewer renderer) into the env panel.
+const LAB_HDRI_PRESETS = {
+  street:     './hdri/wide_street_01_2k.hdr',
+  kloofendal: './hdri/kloofendal_2k.hdr',
+  studio:     './hdri/studio_small_03_2k.hdr',
+  sunset:     './hdri/venice_sunset_2k.hdr',
+  indoor:     './hdri/empty_warehouse_01_2k.hdr',
+  overcast:   './hdri/overcast_soil_2k.hdr',
+};
+
+// Resolve the URL of the HDRI the lab is currently using:
+//   1. Custom HDRI from IndexedDB (if user uploaded one) → blob URL
+//   2. Persisted preset name (bizual_lab_hdri) → /hdri/<file>
+//   3. Default 'street' preset
+async function getActiveHDRIUrl() {
+  if (hasCustomHDRI()) {
+    try {
+      const rec = await loadCustomHDRI();
+      if (rec?.data) {
+        return URL.createObjectURL(new Blob([rec.data], { type: 'application/octet-stream' }));
+      }
+    } catch (e) { /* fall through */ }
+  }
+  const preset = localStorage.getItem('bizual_lab_hdri') || 'street';
+  return LAB_HDRI_PRESETS[preset] || LAB_HDRI_PRESETS.street;
+}
 
 let _mapboxgl = null;
 let _cssInjected = false;
@@ -84,6 +115,7 @@ function createModelLayer(lng, lat, glbUrl, initial = {}) {
 
   let camera, scene, renderer, model;
   let mapRef = null;
+  let _sunRef = null;
 
   // Pre-compute Mercator scale at this latitude (constant within ~one city).
   const mercatorOrigin = _mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
@@ -97,6 +129,16 @@ function createModelLayer(lng, lat, glbUrl, initial = {}) {
     setRotation(deg) { rotDeg = deg; mapRef?.triggerRepaint(); },
     setScale(s)      { scaleMx = Math.max(0.01, s); mapRef?.triggerRepaint(); },
     setAltitude(m)   { altM = m; mapRef?.triggerRepaint(); },
+    setSunHour(hour) {
+      if (!_sunRef) return;
+      const p = getSunParams(hour);
+      _sunRef.intensity = Math.max(0.3, p.sunIntensity);
+      _sunRef.color.setHex(p.sunColor);
+      setSunDirection(_sunRef, p.azimut, p.elevation, 30);
+      _sunRef.visible = !p.isNight;
+      if (scene) scene.environmentIntensity = p.envIntensity;
+      mapRef?.triggerRepaint();
+    },
     getModel()       { return model; },
 
     onAdd(map, gl) {
@@ -104,15 +146,64 @@ function createModelLayer(lng, lat, glbUrl, initial = {}) {
       camera = new THREE.Camera();
       scene = new THREE.Scene();
 
-      // 3-light setup matching the official Mapbox example.
-      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-      const d1 = new THREE.DirectionalLight(0xfff4e5, 1.1);
-      d1.position.set(0, -70, 100).normalize();
-      scene.add(d1);
-      const d2 = new THREE.DirectionalLight(0xc8d8e0, 0.5);
-      d2.position.set(0, 70, 100).normalize();
-      scene.add(d2);
+      renderer = new THREE.WebGLRenderer({
+        canvas: map.getCanvas(),
+        context: gl,
+        antialias: true,
+      });
+      renderer.autoClear = false;
+      // Match the lab viewer's pipeline so the GLB looks the same in both contexts.
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
+      // ── HDRI environment (same as lab viewer) ────────────────────
+      // Built async — the model will pick it up automatically when ready.
+      (async () => {
+        try {
+          const hdriUrl = await getActiveHDRIUrl();
+          const pmrem = new THREE.PMREMGenerator(renderer);
+          pmrem.compileEquirectangularShader();
+          new RGBELoader().load(
+            hdriUrl,
+            (hdrTex) => {
+              const env = pmrem.fromEquirectangular(hdrTex).texture;
+              scene.environment = env;
+              scene.environmentIntensity = 1.0;
+              hdrTex.dispose();
+              pmrem.dispose();
+              if (hdriUrl.startsWith('blob:')) URL.revokeObjectURL(hdriUrl);
+              mapRef.triggerRepaint();
+              console.log('[Bizual Entorno] HDRI aplicado al environment');
+            },
+            undefined,
+            (err) => console.warn('[mapbox-env] HDRI load failed:', err.message)
+          );
+        } catch (e) { console.warn('[mapbox-env] getActiveHDRIUrl failed:', e); }
+      })();
+
+      // ── Sun (synced to lab's sun_hour) + ambient fill ────────────
+      const labHour = parseFloat(localStorage.getItem('bizual_lab_sun_hour') || '12');
+      const sunParams = getSunParams(labHour);
+      const sunLight = new THREE.DirectionalLight(sunParams.sunColor, Math.max(0.3, sunParams.sunIntensity));
+      setSunDirection(sunLight, sunParams.azimut, sunParams.elevation, 30);
+      sunLight.castShadow = true;
+      sunLight.shadow.mapSize.set(2048, 2048);
+      sunLight.shadow.camera.near = 0.1;
+      sunLight.shadow.camera.far = 200;
+      sunLight.shadow.camera.left   = -40;
+      sunLight.shadow.camera.right  =  40;
+      sunLight.shadow.camera.top    =  40;
+      sunLight.shadow.camera.bottom = -40;
+      sunLight.shadow.bias = -0.0001;
+      sunLight.shadow.normalBias = 0.04;
+      scene.add(sunLight);
+      scene.add(new THREE.AmbientLight(0xc8d8e0, 0.15));
+      _sunRef = sunLight; // expose via setSunHour()
+
+      // ── Model load ───────────────────────────────────────────────
       const draco = new DRACOLoader();
       draco.setDecoderPath(DRACO_DECODER);
       draco.setDecoderConfig({ type: 'js' });
@@ -123,6 +214,9 @@ function createModelLayer(lng, lat, glbUrl, initial = {}) {
         glbUrl,
         (gltf) => {
           model = gltf.scene;
+          model.traverse((c) => {
+            if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
+          });
 
           // Auto-center: base at Y=0, X/Z midpoints at 0.
           const box = new THREE.Box3().setFromObject(model);
@@ -131,6 +225,17 @@ function createModelLayer(lng, lat, glbUrl, initial = {}) {
           model.position.set(-center.x, -box.min.y, -center.z);
           model.updateMatrixWorld(true);
           scene.add(model);
+
+          // Invisible plane that just receives shadows — makes the building
+          // cast a real shadow onto the map ground.
+          const shadowGround = new THREE.Mesh(
+            new THREE.PlaneGeometry(200, 200),
+            new THREE.ShadowMaterial({ opacity: 0.25, transparent: true })
+          );
+          shadowGround.rotation.x = -Math.PI / 2;
+          shadowGround.position.y = 0.01;
+          shadowGround.receiveShadow = true;
+          scene.add(shadowGround);
 
           const isLikelyCm = size.y < 5 && size.x < 5 && size.z < 5;
           window.__mapboxModel = { model, box, size, isLikelyCm };
@@ -143,14 +248,6 @@ function createModelLayer(lng, lat, glbUrl, initial = {}) {
         undefined,
         (err) => console.warn('[mapbox-env] GLB load failed:', err)
       );
-
-      renderer = new THREE.WebGLRenderer({
-        canvas: map.getCanvas(),
-        context: gl,
-        antialias: true,
-      });
-      renderer.autoClear = false;
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
     },
 
     render(gl, matrix) {
@@ -224,8 +321,8 @@ export async function openEnvPanel(address, modelUrl, opts = {}) {
         <span class="env-address">${escapeHtml(coords.display.split(',').slice(0, 2).join(',').trim())}</span>
       </div>
       <div class="env-style-btns">
-        <button class="env-style active" data-style="standard"  title="Edificios 3D fotorealistas">🏙️ 3D</button>
-        <button class="env-style"        data-style="satellite" title="Vista satelital">🛰️ Satélite</button>
+        <button class="env-style active" data-style="satellite" title="Vista satelital (default)">🛰️ Satélite</button>
+        <button class="env-style"        data-style="standard"  title="Edificios 3D de Mapbox">🏙️ 3D</button>
         <button class="env-style"        data-style="streets"   title="Mapa de calles">🗺️ Calles</button>
         <button class="env-style"        data-style="dark"      title="Modo oscuro">🌙 Noche</button>
       </div>
@@ -259,7 +356,7 @@ export async function openEnvPanel(address, modelUrl, opts = {}) {
 
   const map = new _mapboxgl.Map({
     container: 'mapbox-container',
-    style: STYLES.standard, // photorealistic 3D city
+    style: STYLES.satellite, // satellite-streets-v12 — real aerial photo + labels
     center: [coords.lon, coords.lat],
     zoom: 17.5,
     pitch: 60,
@@ -333,7 +430,11 @@ export async function openEnvPanel(address, modelUrl, opts = {}) {
   document.addEventListener('keydown', escHandler);
   panel._escHandler = escHandler;
 
-  return { map, coords };
+  return {
+    map,
+    coords,
+    setSunHour: (hour) => _activeLayer?.setSunHour?.(hour),
+  };
 }
 
 export function closeEnvPanel() {

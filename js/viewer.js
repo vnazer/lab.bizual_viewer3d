@@ -7,10 +7,10 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260517';
-import { PostFX } from './postfx.js?v=20260517';
-import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260517';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260517';
+} from './scene.js?v=20260518';
+import { PostFX } from './postfx.js?v=20260518';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260518';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260518';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
@@ -18,8 +18,8 @@ import {
   formatWaypointJSON, parseWaypointJSON, normalizeImportedWaypoints,
   getWaypointSlots, guessModelTypeFromFilename,
   UNIT_WAYPOINT_SLOTS, EDIFICIO_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260517';
-import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260517';
+} from './waypoints.js?v=20260518';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260518';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -1016,6 +1016,10 @@ function applySunHour(hour) {
 
   ls.set('sun_hour', hour);
   ls.set('sun_hour_active', true);
+
+  // If the Mapbox env panel is open, push the same hour to its sun.
+  // Defined later in the file — guard for hoist order.
+  try { if (typeof _envHandle !== 'undefined') _envHandle?.setSunHour(hour); } catch {}
 }
 
 function updateSunHourDisplay(hour) {
@@ -2151,6 +2155,9 @@ document.querySelectorAll('.map-modes .pill[data-map-mode]').forEach((btn) => {
 // ── Mapbox real-environment full-screen panel ──────────────────────
 // All UI lives in mapbox-env.js (it's a self-contained #env-panel that
 // renders over the viewer). viewer.js only fires the open call.
+let _envHandle = null;
+window.__envHandleAccess = () => _envHandle;
+
 $('btn-show-mapbox')?.addEventListener('click', async () => {
   const addr = (addressInput?.value || '').trim();
   if (!addr) {
@@ -2166,8 +2173,8 @@ $('btn-show-mapbox')?.addEventListener('click', async () => {
     ? currentModelUrl.replace(/tipologia[^/]*\.glb/i, 'Edificio_01_exterior.glb')
     : currentModelUrl;
   try {
-    const mod = await import('./mapbox-env.js?v=20260517');
-    await mod.openEnvPanel(addr, modelForEnv);
+    const mod = await import('./mapbox-env.js?v=20260518');
+    _envHandle = await mod.openEnvPanel(addr, modelForEnv);
   } catch (err) {
     console.error('[mapbox-env] open failed:', err);
     alert('Error abriendo entorno: ' + err.message);
