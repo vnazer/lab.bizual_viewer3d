@@ -7,10 +7,10 @@ import {
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   analyzeModelAlbedo,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260515';
-import { PostFX } from './postfx.js?v=20260515';
-import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260515';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260515';
+} from './scene.js?v=20260516';
+import { PostFX } from './postfx.js?v=20260516';
+import { saveCustomHDRI, loadCustomHDRI, clearCustomHDRI, getCustomHDRIName, hasCustomHDRI } from './hdri-store.js?v=20260516';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260516';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
   CameraController, rotateOrbit, snapshotPose,
@@ -18,8 +18,8 @@ import {
   formatWaypointJSON, parseWaypointJSON, normalizeImportedWaypoints,
   getWaypointSlots, guessModelTypeFromFilename,
   UNIT_WAYPOINT_SLOTS, EDIFICIO_WAYPOINT_SLOTS,
-} from './waypoints.js?v=20260515';
-import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260515';
+} from './waypoints.js?v=20260516';
+import { initUnitLabels, updateUnitLabels, setUnitMode, registerUnitClickHandler, setupDblclickEntry } from './units.js?v=20260516';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -2196,14 +2196,28 @@ async function openMapboxEnv() {
   $('mapbox-address').textContent = addr;
   openModal($('modal-mapbox'));
 
+  // Restore persisted slider values BEFORE opening the layer so they're
+  // applied on first paint instead of snapping after.
+  const persistedRot   = parseFloat(localStorage.getItem('bizual_lab_env_rotation') || '0');
+  const persistedScale = parseFloat(localStorage.getItem('bizual_lab_env_scale')    || '1.0');
+  const persistedAlt   = parseFloat(localStorage.getItem('bizual_lab_env_altitude') || '0');
+  if (mbBearing) { mbBearing.value = persistedRot;   $('mapbox-bearing-val').textContent  = `${persistedRot|0}°`; }
+  if (mbScale)   { mbScale.value   = persistedScale; $('mapbox-scale-val').textContent    = persistedScale.toFixed(2); }
+  if (mbAlt)     { mbAlt.value     = persistedAlt;   $('mapbox-altitude-val').textContent = `${persistedAlt} m`; }
+
   // Lazy-load mapbox module on first use.
   try {
-    const mod = await import('./mapbox-env.js?v=20260515');
+    const mod = await import('./mapbox-env.js?v=20260516');
     _mapboxHandle = await mod.openEnvironment({
       container: $('mapbox-container'),
       address: addr,
       modelUrl: currentModelUrl,
       token,
+      initial: {
+        rotation: persistedRot,
+        scale:    persistedScale,
+        altitude: persistedAlt,
+      },
     });
   } catch (err) {
     console.error('[mapbox-env] open failed:', err);
@@ -2228,16 +2242,19 @@ mbBearing?.addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
   $('mapbox-bearing-val').textContent = `${v|0}°`;
   _mapboxHandle?.setBearing(v);
+  localStorage.setItem('bizual_lab_env_rotation', String(v));
 });
 mbScale?.addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
   $('mapbox-scale-val').textContent = v.toFixed(2);
   _mapboxHandle?.setScale(v);
+  localStorage.setItem('bizual_lab_env_scale', String(v));
 });
 mbAlt?.addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
   $('mapbox-altitude-val').textContent = `${v} m`;
   _mapboxHandle?.setAltitude(v);
+  localStorage.setItem('bizual_lab_env_altitude', String(v));
 });
 
 $('mapbox-set-token')?.addEventListener('click', () => {
