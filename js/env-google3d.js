@@ -128,8 +128,13 @@ let _activeTiles = null;
 export function closeGoogle3DPanel() {
   if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
   if (_resizeObs) { _resizeObs.disconnect(); _resizeObs = null; }
-  if (_activeTiles) { try { _activeTiles.dispose(); } catch {} _activeTiles = null; }
+  if (_activeTiles) {
+    if (_activeTiles._statsInterval) clearInterval(_activeTiles._statsInterval);
+    try { _activeTiles.dispose(); } catch {}
+    _activeTiles = null;
+  }
   if (_activeRenderer) { try { _activeRenderer.dispose(); } catch {} _activeRenderer = null; }
+  window.__tiles = null;
   document.getElementById('g3d-panel')?.remove();
   document.getElementById('g3d-key-dialog')?.remove();
 }
@@ -264,7 +269,20 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   camera.lookAt(latLonToECEF(lat, lon, 0));
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x87ceeb);
+  // Soft sky skybox (cielo a horizonte gradient) — less jarring than a flat
+  // blue while tiles stream in. Sphere is bigger than camera.far far enough
+  // to never get clipped.
+  {
+    const skyGeo = new THREE.SphereGeometry(5e6, 32, 16);
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      uniforms: { topColor: { value: new THREE.Color(0x4d8fcf) }, bottomColor: { value: new THREE.Color(0xeaf4fb) } },
+      vertexShader: `varying vec3 vWorld; void main(){ vWorld = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+      fragmentShader: `varying vec3 vWorld; uniform vec3 topColor; uniform vec3 bottomColor; void main(){ float h = clamp(normalize(vWorld).z, -1.0, 1.0); vec3 c = mix(bottomColor, topColor, smoothstep(-0.1, 0.6, h)); gl_FragColor = vec4(c, 1.0); }`,
+    });
+    scene.add(new THREE.Mesh(skyGeo, skyMat));
+    scene.background = null;
+  }
 
   // ─── Google 3D Tiles ────────────────────────────────────────────────────
   const tiles = new TilesRenderer(GOOGLE_TILES_URL);
@@ -276,6 +294,34 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   tiles.setResolutionFromRenderer(camera, renderer);
   scene.add(tiles.group);
   _activeTiles = tiles;
+  window.__tiles = tiles;
+
+  // ── Diagnostics: surface load failures + stats so the user can debug
+  tiles.addEventListener('load-tile-set', () => {
+    console.log('[Google 3D] ✅ Tileset cargado');
+  });
+  tiles.addEventListener('load-error', (event) => {
+    const msg = event.message || event.error?.message || JSON.stringify(event);
+    console.error('[Google 3D] ❌ Error cargando tile:', msg);
+    if (/403/.test(msg)) console.error('[Google 3D] → 403: Map Tiles API no está habilitada en esta key');
+    if (/401/.test(msg)) console.error('[Google 3D] → 401: API key inválida');
+    if (/429/.test(msg)) console.error('[Google 3D] → 429: rate limit / cuota excedida');
+  });
+
+  // Periodic stats — helps diagnose "stuck on blue sky" cases.
+  const _statsInterval = setInterval(() => {
+    if (!tiles?.stats) return;
+    const s = tiles.stats;
+    console.log('[Google 3D] stats:', {
+      loading: s.loading, failed: s.failed,
+      inFrustum: s.inFrustum, active: s.active, downloading: s.downloading,
+    });
+    if (s.failed > 0 && s.active === 0) {
+      console.warn('[Google 3D] All tile loads failed — verificá la API key + Map Tiles API habilitada');
+    }
+  }, 5000);
+  // Stop the interval when panel closes — store on the tiles handle.
+  tiles._statsInterval = _statsInterval;
 
   // OrbitControls — orbit around the building's surface point
   const controls = new OrbitControls(camera, canvas);
