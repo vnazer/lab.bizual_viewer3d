@@ -3,10 +3,11 @@ import {
   createRenderer, createScene, createCamera, createControls,
   getGLTFLoader, loadHDRI, setCustomHDRI, frameObject, countTriangles, enableShadows,
   fetchManifest, loadGLBWithStats, formatBytes,
-  HDRI_PRESETS, DEFAULT_HDRI_ID,
+  HDRI_PRESETS, DEFAULT_HDRI_ID, setSunDirection,
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260508';
+} from './scene.js?v=20260509';
+import { PostFX } from './postfx.js?v=20260509';
 import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260508';
 import {
   detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
@@ -26,12 +27,15 @@ const ls = {
 };
 
 const TONEMAP_BY_ID = {
+  agx:      THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping,
   aces:     THREE.ACESFilmicToneMapping,
   neutral:  THREE.NeutralToneMapping ?? THREE.ACESFilmicToneMapping,
   cineon:   THREE.CineonToneMapping,
   reinhard: THREE.ReinhardToneMapping,
   linear:   THREE.LinearToneMapping,
 };
+const HAS_AGX = !!THREE.AgXToneMapping;
+const DEFAULT_TONEMAP = HAS_AGX ? 'agx' : 'aces';
 
 const host = document.getElementById('canvas-wrap');
 const $ = (id) => document.getElementById(id);
@@ -42,10 +46,11 @@ window.__renderer = renderer;
 const tagEl = $('renderer-tag');
 if (tagEl) tagEl.textContent = backend.toUpperCase();
 
-const { scene, sun, hemi, contactShadows } = createScene();
+const { scene, sun, hemi, ambient, contactShadows } = createScene();
 window.__scene = scene;
 window.__sunLight = sun;
-window.__ambientLight = hemi;
+window.__ambientLight = ambient ?? hemi;
+window.__hemiLight = hemi;
 
 const camera = createCamera(host);
 const controls = createControls(camera, renderer.domElement);
@@ -245,14 +250,61 @@ let currentMaterials = [];
 let isolatedUuid = null;
 
 // Apply persisted tone mapping + exposure BEFORE first render so we don't flash defaults.
-const persistedTonemap = ls.get('tonemap', 'aces');
-const persistedExposure = ls.get('exposure', 1.0);
-const persistedEnvIntensity = ls.get('envIntensity', 1.0);
+const persistedTonemap = ls.get('tonemap', DEFAULT_TONEMAP);
+const persistedExposure = ls.get('exposure', 1.15);       // bumped default
+const persistedEnvIntensity = ls.get('envIntensity', 1.20); // bumped default
 const persistedHdriId = ls.get('hdri', DEFAULT_HDRI_ID);
 renderer.toneMapping = TONEMAP_BY_ID[persistedTonemap] ?? THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = persistedExposure;
 scene.environmentIntensity = persistedEnvIntensity;
 window.__envIntensity = persistedEnvIntensity;
+
+// ────────────────────────────────────────────────────────────────────
+// Post-processing pipeline (only on WebGL2; WebGPU path skips composer).
+// ────────────────────────────────────────────────────────────────────
+let postfx = null;
+const isWebGL2 = backend === 'webgl2';
+if (isWebGL2) {
+  try {
+    postfx = new PostFX(renderer, scene, camera, host);
+    window.__postfx = postfx;
+  } catch (err) {
+    console.warn('[lab] PostFX init failed, rendering without post-processing:', err);
+    postfx = null;
+  }
+}
+
+// Visual state (preset + post-fx + sun) — persisted.
+const persistedVisualPreset  = ls.get('visual_preset',  'estandar');
+const persistedSSAOOn        = ls.get('ssao_on',        true);
+const persistedSSAOIntensity = ls.get('ssao_intensity', 20);
+const persistedBloomOn       = ls.get('bloom_on',       true);
+const persistedBloomIntensity= ls.get('bloom_intensity', 0.30);
+const persistedContrast      = ls.get('contrast',       0.10);
+const persistedSunOn         = ls.get('sun_on',         true);
+const persistedSunIntensity  = ls.get('sun_intensity',  1.5);
+const persistedSunAzimut     = ls.get('sun_azimut',     45);
+const persistedSunElevation  = ls.get('sun_elevation',  55);
+
+// Apply sun state immediately
+sun.visible = persistedSunOn;
+sun.intensity = persistedSunIntensity;
+setSunDirection(sun, persistedSunAzimut, persistedSunElevation, 30);
+
+// Apply post-fx state immediately
+if (postfx) {
+  postfx.setSSAO(persistedSSAOOn, persistedSSAOIntensity);
+  postfx.setBloom(persistedBloomOn, persistedBloomIntensity);
+  postfx.setContrast(persistedContrast);
+}
+
+window.__visualState = {
+  preset: persistedVisualPreset,
+  ssao: { on: persistedSSAOOn, intensity: persistedSSAOIntensity },
+  bloom: { on: persistedBloomOn, intensity: persistedBloomIntensity },
+  contrast: persistedContrast,
+  sun: { on: persistedSunOn, intensity: persistedSunIntensity, azimut: persistedSunAzimut, elevation: persistedSunElevation },
+};
 
 // Anisotropy: 4 pill buttons (1× / 4× / 8× / 16×). Default 8×, capped at GPU max.
 const maxAniso = renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
@@ -650,6 +702,226 @@ if (envSlider) {
   });
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Sun controls (intensity / azimut / elevation / on-off)
+// ────────────────────────────────────────────────────────────────────
+const sunOnEl     = $('sun-on');
+const sunIntEl    = $('sun-intensity');
+const sunIntOut   = $('sun-intensity-val');
+const sunAzEl     = $('sun-azimut');
+const sunAzOut    = $('sun-azimut-val');
+const sunElEl     = $('sun-elevation');
+const sunElOut    = $('sun-elevation-val');
+
+function syncSunUI() {
+  const v = window.__visualState.sun;
+  if (sunOnEl)   sunOnEl.checked = v.on;
+  if (sunIntEl)  { sunIntEl.value = v.intensity;  if (sunIntOut) sunIntOut.textContent = v.intensity.toFixed(2); }
+  if (sunAzEl)   { sunAzEl.value  = v.azimut;     if (sunAzOut)  sunAzOut.textContent  = `${v.azimut|0}°`; }
+  if (sunElEl)   { sunElEl.value  = v.elevation;  if (sunElOut)  sunElOut.textContent  = `${v.elevation|0}°`; }
+}
+syncSunUI();
+
+function applySun() {
+  const v = window.__visualState.sun;
+  sun.visible = v.on;
+  sun.intensity = v.intensity;
+  setSunDirection(sun, v.azimut, v.elevation, 30);
+}
+
+if (sunOnEl) {
+  sunOnEl.addEventListener('change', (e) => {
+    window.__visualState.sun.on = e.target.checked;
+    ls.set('sun_on', e.target.checked);
+    applySun();
+  });
+}
+if (sunIntEl) {
+  sunIntEl.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    window.__visualState.sun.intensity = v;
+    ls.set('sun_intensity', v);
+    if (sunIntOut) sunIntOut.textContent = v.toFixed(2);
+    applySun();
+  });
+}
+if (sunAzEl) {
+  sunAzEl.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    window.__visualState.sun.azimut = v;
+    ls.set('sun_azimut', v);
+    if (sunAzOut) sunAzOut.textContent = `${v|0}°`;
+    applySun();
+  });
+}
+if (sunElEl) {
+  sunElEl.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    window.__visualState.sun.elevation = v;
+    ls.set('sun_elevation', v);
+    if (sunElOut) sunElOut.textContent = `${v|0}°`;
+    applySun();
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────
+// VISUAL panel: presets + SSAO + Bloom + Contrast
+// ────────────────────────────────────────────────────────────────────
+const ssaoOnEl    = $('ssao-on');
+const ssaoIntEl   = $('ssao-intensity');
+const ssaoIntOut  = $('ssao-intensity-val');
+const bloomOnEl   = $('bloom-on');
+const bloomIntEl  = $('bloom-intensity');
+const bloomIntOut = $('bloom-intensity-val');
+const contrastEl  = $('contrast');
+const contrastOut = $('contrast-val');
+
+function syncVisualUI() {
+  const v = window.__visualState;
+  if (ssaoOnEl)   ssaoOnEl.checked  = v.ssao.on;
+  if (ssaoIntEl)  { ssaoIntEl.value = v.ssao.intensity;  if (ssaoIntOut) ssaoIntOut.textContent = String(v.ssao.intensity|0); }
+  if (bloomOnEl)  bloomOnEl.checked = v.bloom.on;
+  if (bloomIntEl) { bloomIntEl.value = v.bloom.intensity; if (bloomIntOut) bloomIntOut.textContent = v.bloom.intensity.toFixed(2); }
+  if (contrastEl) { contrastEl.value = v.contrast; if (contrastOut) contrastOut.textContent = v.contrast.toFixed(2); }
+  document.querySelectorAll('#visual-presets .pill').forEach((b) => {
+    b.classList.toggle('active', b.dataset.preset === v.preset);
+  });
+}
+syncVisualUI();
+
+function applyVisual() {
+  const v = window.__visualState;
+  if (postfx) {
+    postfx.setSSAO(v.ssao.on, v.ssao.intensity);
+    postfx.setBloom(v.bloom.on, v.bloom.intensity);
+    postfx.setContrast(v.contrast);
+  }
+}
+
+if (ssaoOnEl) {
+  ssaoOnEl.addEventListener('change', (e) => {
+    window.__visualState.ssao.on = e.target.checked;
+    ls.set('ssao_on', e.target.checked);
+    applyVisual();
+  });
+}
+if (ssaoIntEl) {
+  ssaoIntEl.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    window.__visualState.ssao.intensity = v;
+    ls.set('ssao_intensity', v);
+    if (ssaoIntOut) ssaoIntOut.textContent = String(v|0);
+    applyVisual();
+  });
+}
+if (bloomOnEl) {
+  bloomOnEl.addEventListener('change', (e) => {
+    window.__visualState.bloom.on = e.target.checked;
+    ls.set('bloom_on', e.target.checked);
+    applyVisual();
+  });
+}
+if (bloomIntEl) {
+  bloomIntEl.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    window.__visualState.bloom.intensity = v;
+    ls.set('bloom_intensity', v);
+    if (bloomIntOut) bloomIntOut.textContent = v.toFixed(2);
+    applyVisual();
+  });
+}
+if (contrastEl) {
+  contrastEl.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    window.__visualState.contrast = v;
+    ls.set('contrast', v);
+    if (contrastOut) contrastOut.textContent = v.toFixed(2);
+    applyVisual();
+  });
+}
+
+// Visual presets — apply combinations all at once, sync everything.
+const VISUAL_PRESETS = {
+  plano: {
+    ssao:  { on: false, intensity: 0 },
+    bloom: { on: false, intensity: 0 },
+    contrast: 0.0,
+    exposure: 1.00,
+    envIntensity: 0.75,
+    sun: { on: true, intensity: 1.5, azimut: 45, elevation: 55 },
+    tonemap: 'aces',
+  },
+  estandar: {
+    ssao:  { on: true, intensity: 20 },
+    bloom: { on: true, intensity: 0.30 },
+    contrast: 0.10,
+    exposure: 1.15,
+    envIntensity: 1.20,
+    sun: { on: true, intensity: 1.5, azimut: 45, elevation: 55 },
+    tonemap: DEFAULT_TONEMAP,
+  },
+  cinematic: {
+    ssao:  { on: true, intensity: 35 },
+    bloom: { on: true, intensity: 0.50 },
+    contrast: 0.20,
+    exposure: 1.25,
+    envIntensity: 1.40,
+    sun: { on: true, intensity: 2.0, azimut: 45, elevation: 55 },
+    tonemap: HAS_AGX ? 'agx' : 'aces',
+  },
+};
+
+function applyPreset(id) {
+  const p = VISUAL_PRESETS[id];
+  if (!p) return;
+  const v = window.__visualState;
+  v.preset = id;
+  v.ssao = { ...p.ssao };
+  v.bloom = { ...p.bloom };
+  v.contrast = p.contrast;
+  v.sun = { ...p.sun };
+  // Apply the iluminación-side values too.
+  renderer.toneMappingExposure = p.exposure;
+  scene.environmentIntensity = p.envIntensity;
+  window.__envIntensity = p.envIntensity;
+  renderer.toneMapping = TONEMAP_BY_ID[p.tonemap] ?? THREE.ACESFilmicToneMapping;
+  // Persist everything individually.
+  ls.set('visual_preset', id);
+  ls.set('ssao_on', v.ssao.on);
+  ls.set('ssao_intensity', v.ssao.intensity);
+  ls.set('bloom_on', v.bloom.on);
+  ls.set('bloom_intensity', v.bloom.intensity);
+  ls.set('contrast', v.contrast);
+  ls.set('exposure', p.exposure);
+  ls.set('envIntensity', p.envIntensity);
+  ls.set('tonemap', p.tonemap);
+  ls.set('sun_on', v.sun.on);
+  ls.set('sun_intensity', v.sun.intensity);
+  ls.set('sun_azimut', v.sun.azimut);
+  ls.set('sun_elevation', v.sun.elevation);
+  // Sync exposure/env sliders + tonemap select.
+  if (expoSlider) { expoSlider.value = p.exposure; if (expoOut) expoOut.textContent = p.exposure.toFixed(2); }
+  if (envSlider)  { envSlider.value  = p.envIntensity; if (envOut) envOut.textContent  = p.envIntensity.toFixed(2); }
+  if (tonemapSel) tonemapSel.value = p.tonemap;
+  // Materials need needsUpdate=true after tone-mapping change.
+  if (currentModel) {
+    currentModel.traverse((o) => {
+      if (o.isMesh && o.material) {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach((m) => { m.needsUpdate = true; });
+      }
+    });
+  }
+  applySun();
+  applyVisual();
+  syncSunUI();
+  syncVisualUI();
+}
+
+document.querySelectorAll('#visual-presets .pill').forEach((btn) => {
+  btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+});
+
 // Wireframe global toggle
 const wireAll = $('toggle-wireframe-all');
 if (wireAll) {
@@ -922,6 +1194,7 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  if (postfx) postfx.resize();
 }
 window.addEventListener('resize', resize);
 resize();
@@ -957,13 +1230,26 @@ function animate() {
       controls.update();
     }
   }
-  // WebGPURenderer exposes renderAsync; WebGLRenderer uses render
+  // Composer when post-fx active (any of SSAO/Bloom/Contrast); otherwise direct render.
+  // WebGPURenderer takes the renderAsync path and skips composer entirely.
   if (typeof renderer.renderAsync === 'function') {
     renderer.renderAsync(scene, camera);
+  } else if (postfx && postfxActive()) {
+    postfx.render();
   } else {
     renderer.render(scene, camera);
   }
   updateFPS();
+}
+
+function postfxActive() {
+  if (!postfx) return false;
+  const v = window.__visualState;
+  if (!v) return true; // pre-init: default to composer (cheap)
+  // Composer always runs SSAO/Bloom/Contrast passes; if all disabled and contrast=0
+  // we'd want to bypass to save GPU. With contrast slider != 0 (default 0.10),
+  // composer is needed. Plano preset sets contrast=0 + SSAO/Bloom off → bypass.
+  return v.ssao.on || v.bloom.on || Math.abs(v.contrast) > 0.001;
 }
 renderer.setAnimationLoop(animate);
 

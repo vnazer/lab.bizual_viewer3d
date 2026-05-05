@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260508" />
+  <link rel="stylesheet" href="./css/style.css?v=20260509" />
   <script type="importmap">
   {
     "imports": {
@@ -147,7 +147,8 @@
       <label class="row">
         <span>Tone Mapping</span>
         <select id="tonemap-select">
-          <option value="aces">ACES Filmic (default)</option>
+          <option value="agx">AgX (recomendado interiores)</option>
+          <option value="aces">ACES Filmic</option>
           <option value="neutral">Neutral</option>
           <option value="cineon">Cineon</option>
           <option value="reinhard">Reinhard</option>
@@ -182,6 +183,61 @@
         <input type="checkbox" id="toggle-rotate" />
         <span>Auto-rotate</span>
       </label>
+
+      <div class="row label-only"><span>Luz solar</span></div>
+      <label class="row checkbox">
+        <input type="checkbox" id="sun-on" checked />
+        <span>Sol direccional</span>
+      </label>
+      <label class="row slider">
+        <span>Intensidad</span>
+        <input type="range" id="sun-intensity" min="0" max="3.0" step="0.05" value="1.5" />
+        <output id="sun-intensity-val">1.50</output>
+      </label>
+      <label class="row slider">
+        <span>Azimut</span>
+        <input type="range" id="sun-azimut" min="0" max="360" step="1" value="45" />
+        <output id="sun-azimut-val">45°</output>
+      </label>
+      <label class="row slider">
+        <span>Elevación</span>
+        <input type="range" id="sun-elevation" min="0" max="90" step="1" value="55" />
+        <output id="sun-elevation-val">55°</output>
+      </label>
+    </details>
+
+    <details class="panel" open>
+      <summary>Visual</summary>
+      <div class="row label-only"><span>Preset</span></div>
+      <div class="pill-group" id="visual-presets" role="radiogroup" aria-label="Visual preset">
+        <button type="button" class="pill" data-preset="plano">Plano</button>
+        <button type="button" class="pill active" data-preset="estandar">Estándar</button>
+        <button type="button" class="pill" data-preset="cinematic">Cinematic</button>
+      </div>
+      <label class="row slider">
+        <span>Contraste</span>
+        <input type="range" id="contrast" min="-0.5" max="0.5" step="0.01" value="0.10" />
+        <output id="contrast-val">0.10</output>
+      </label>
+      <label class="row checkbox">
+        <input type="checkbox" id="ssao-on" checked />
+        <span>SSAO (oclusión ambiental)</span>
+      </label>
+      <label class="row slider">
+        <span>SSAO intensity</span>
+        <input type="range" id="ssao-intensity" min="0" max="50" step="1" value="20" />
+        <output id="ssao-intensity-val">20</output>
+      </label>
+      <label class="row checkbox">
+        <input type="checkbox" id="bloom-on" checked />
+        <span>Bloom</span>
+      </label>
+      <label class="row slider">
+        <span>Bloom intensity</span>
+        <input type="range" id="bloom-intensity" min="0" max="1.5" step="0.01" value="0.30" />
+        <output id="bloom-intensity-val">0.30</output>
+      </label>
+      <small class="hint">SSAO + Bloom suman costo de GPU. Si el FPS baja, usá preset Plano.</small>
     </details>
 
     <details class="panel" open>
@@ -242,6 +298,6 @@
     <div class="up-pct">0%</div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260508"></script>
+  <script type="module" src="./js/viewer.js?v=20260509"></script>
 </body>
 </html>

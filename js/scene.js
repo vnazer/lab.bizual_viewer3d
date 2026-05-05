@@ -6,7 +6,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { sanitizeGLB } from './sanitize.js?v=20260508';
+import { sanitizeGLB } from './sanitize.js?v=20260509';
 
 // ────────────────────────────────────────────────────────────────────
 // HDRI presets — Poly Haven 2K, CC0. Servidos localmente desde /hdri/.
@@ -69,24 +69,29 @@ export function createScene() {
   const scene = new THREE.Scene();
   scene.background = null; // transparent until HDRI applies
 
-  // Sun (key light)
-  const sun = new THREE.DirectionalLight(0xffffff, 2.5);
-  sun.position.set(5, 8, 4);
+  // Sun (key light): warm white, sized for both unit-scale and building scenes.
+  const sun = new THREE.DirectionalLight(0xfff4e5, 1.5);
+  setSunDirection(sun, 45, 55, 30); // azimut 45° · elevation 55°
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -5;
-  sun.shadow.camera.right = 5;
-  sun.shadow.camera.top = 5;
-  sun.shadow.camera.bottom = -5;
-  sun.shadow.camera.near = 0.1;
-  sun.shadow.camera.far = 30;
+  // Frustum widened to cover building-size models (~25-30 m bbox).
+  sun.shadow.camera.left = -25;
+  sun.shadow.camera.right = 25;
+  sun.shadow.camera.top = 25;
+  sun.shadow.camera.bottom = -25;
+  sun.shadow.camera.near = 0.5;
+  sun.shadow.camera.far = 100;
   sun.shadow.bias = -0.0005;
   sun.shadow.radius = 4; // soft shadow PCF
   scene.add(sun);
 
-  // Soft fill
+  // Hemisphere fill (sky/ground rim).
   const hemi = new THREE.HemisphereLight(0xb1d6ff, 0x222222, 0.4);
   scene.add(hemi);
+
+  // Cool ambient — keeps shadows from going to pure black.
+  const ambient = new THREE.AmbientLight(0xc8d8e0, 0.15);
+  scene.add(ambient);
 
   // Contact shadow plane: invisible plane that just receives shadows.
   // (The drei-style ContactShadows is not part of stock three addons.)
@@ -99,7 +104,22 @@ export function createScene() {
   contactShadows.receiveShadow = true;
   scene.add(contactShadows);
 
-  return { scene, sun, hemi, contactShadows };
+  return { scene, sun, hemi, ambient, contactShadows };
+}
+
+// Convert (azimut°, elevation°) into a sun world-position on a sphere of `radius`.
+export function setSunDirection(sun, azDeg, elDeg, radius = 30) {
+  const az = THREE.MathUtils.degToRad(azDeg);
+  const el = THREE.MathUtils.degToRad(elDeg);
+  sun.position.set(
+    radius * Math.cos(el) * Math.cos(az),
+    radius * Math.sin(el),
+    radius * Math.cos(el) * Math.sin(az)
+  );
+  if (sun.target) {
+    sun.target.position.set(0, 0, 0);
+    sun.target.updateMatrixWorld?.();
+  }
 }
 
 export function createCamera(host) {
