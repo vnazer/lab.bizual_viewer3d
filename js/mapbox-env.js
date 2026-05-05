@@ -9,8 +9,8 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260518';
-import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260518';
+import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
+import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 
 const MAPBOX_VERSION  = '3.11.0';
 const MAPBOX_CSS_URL  = `https://api.mapbox.com/mapbox-gl-js/v${MAPBOX_VERSION}/mapbox-gl.css`;

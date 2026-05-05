@@ -4,13 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260518" />
+  <link rel="stylesheet" href="./css/style.css?v=20260519" />
   <script type="importmap">
   {
     "imports": {
       "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
       "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/",
-      "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.8/build/index.module.js"
+      "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.8/build/index.module.js",
+      "3d-tiles-renderer": "https://esm.sh/3d-tiles-renderer@0.4.7?external=three",
+      "3d-tiles-renderer/plugins": "https://esm.sh/3d-tiles-renderer@0.4.7/plugins?external=three"
     }
   }
   </script>
@@ -56,7 +58,8 @@
         <input id="project-address" type="text" placeholder="Av. Libertad 1234, Viña del Mar" />
         <div class="row dual-btn" style="margin-top:4px;">
           <button id="btn-show-map">🗺️ Maps</button>
-          <button id="btn-show-mapbox">🌍 Entorno real</button>
+          <button id="btn-show-mapbox">🌍 Mapbox</button>
+          <button id="btn-show-g3d" title="Google Photorealistic 3D Tiles">🏙 Google 3D</button>
         </div>
       </label>
     </details>
@@ -386,6 +389,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260518"></script>
+  <script type="module" src="./js/viewer.js?v=20260519"></script>
 </body>
 </html>
