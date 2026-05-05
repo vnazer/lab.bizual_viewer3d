@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>lab.bizual.ai · 3D viewer</title>
-  <link rel="stylesheet" href="./css/style.css?v=20260505" />
+  <link rel="stylesheet" href="./css/style.css?v=20260506" />
   <script type="importmap">
   {
     "imports": {
@@ -73,6 +73,60 @@
       </label>
       <button id="btn-enter-model" class="primary-btn">🚪 Entrar al modelo</button>
       <small class="hint" id="nav-hint">WASD = mover · Mouse = mirar · Shift = correr · Space/Ctrl = subir/bajar · Esc = soltar mouse</small>
+    </details>
+
+    <details class="panel" open>
+      <summary>Vistas <span id="model-type-badge" class="badge">—</span></summary>
+      <label class="row">
+        <span>Tipo de modelo</span>
+        <select id="model-type-select">
+          <option value="auto">Auto-detectado</option>
+          <option value="edificio">Edificio (T15)</option>
+          <option value="unidad">Unidad (T14)</option>
+          <option value="mixto">Mixto (ambos)</option>
+        </select>
+      </label>
+
+      <div id="views-edificio" class="views-section" style="display:none;">
+        <div class="row label-only"><span>Edificio</span></div>
+        <div class="view-grid" id="views-edificio-grid"></div>
+        <div class="arrow-pad">
+          <button data-arrow="up" title="Elevar">↑</button>
+          <button data-arrow="left" title="Rotar izq">←</button>
+          <button data-arrow="reset" title="Reset">⊙</button>
+          <button data-arrow="right" title="Rotar der">→</button>
+          <button data-arrow="down" title="Bajar">↓</button>
+        </div>
+        <div class="row dual-btn">
+          <button id="btn-autorotate" class="autorotate-btn">⏸ Pausar auto-rotate</button>
+          <button id="btn-reset-edificio">🔄 Reset</button>
+        </div>
+      </div>
+
+      <div id="views-unidad" class="views-section" style="display:none;">
+        <div class="row label-only"><span>Unidad</span></div>
+        <div class="view-grid" id="views-unidad-grid"></div>
+        <button id="btn-reset-unidad" style="width:100%;">🔄 Reset</button>
+      </div>
+
+      <details class="sub-panel">
+        <summary>Editor de waypoints</summary>
+        <label class="row checkbox">
+          <input type="checkbox" id="wp-edit-mode" />
+          <span>Modo edición activo</span>
+        </label>
+        <small class="hint">Ubicá la cámara con OrbitControls y guardá la pose en uno de los slots.</small>
+        <div id="wp-save-slots" class="view-grid"></div>
+        <div class="row label-only"><span>Guardados (este archivo)</span></div>
+        <div id="wp-saved-list" class="saved-waypoints"><em class="hint">Ninguno todavía.</em></div>
+        <div class="row dual-btn">
+          <button id="wp-copy-json">📋 Copiar JSON</button>
+          <button id="wp-clear-all">🗑 Limpiar</button>
+        </div>
+        <div class="row">
+          <button id="wp-import">📥 Importar JSON</button>
+        </div>
+      </details>
     </details>
 
     <details class="panel" open>
@@ -178,6 +232,6 @@
     <div class="up-pct">0%</div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260505"></script>
+  <script type="module" src="./js/viewer.js?v=20260506"></script>
 </body>
 </html>

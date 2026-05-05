@@ -458,6 +458,101 @@ button:hover { background: rgba(102, 204, 255, 0.25); }
 body.nav-fps #canvas-wrap canvas { cursor: none; }
 body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
 
+/* views / waypoints panel */
+.views-section { margin: 8px 0 4px; }
+.row.label-only > span:first-child { margin-bottom: 4px; }
+.view-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin: 6px 0 8px;
+}
+.view-grid button {
+  margin: 0;
+  padding: 8px 4px;
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.view-grid button.active {
+  background: rgba(102, 204, 255, 0.35);
+  border-color: var(--accent);
+}
+.arrow-pad {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-areas:
+    ".    up    ."
+    "left reset right"
+    ".    down  .";
+  gap: 3px;
+  margin: 6px 0;
+}
+.arrow-pad button {
+  margin: 0;
+  padding: 4px 0;
+  font-size: 14px;
+}
+.arrow-pad button[data-arrow="up"]    { grid-area: up; }
+.arrow-pad button[data-arrow="down"]  { grid-area: down; }
+.arrow-pad button[data-arrow="left"]  { grid-area: left; }
+.arrow-pad button[data-arrow="right"] { grid-area: right; }
+.arrow-pad button[data-arrow="reset"] { grid-area: reset; opacity: 0.7; }
+.row.dual-btn { flex-direction: row; gap: 6px; }
+.row.dual-btn button { flex: 1; margin: 0; }
+.autorotate-btn.active {
+  background: rgba(102, 204, 255, 0.35);
+  border-color: var(--accent);
+}
+
+.sub-panel {
+  margin-top: 10px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+.sub-panel summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+.sub-panel summary::-webkit-details-marker { display: none; }
+.sub-panel summary::before {
+  content: '▸ ';
+  display: inline-block;
+  transition: transform 120ms;
+}
+.sub-panel[open] summary::before { transform: rotate(90deg); }
+
+.saved-waypoints {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.saved-waypoints .wp-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  margin-bottom: 3px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.saved-waypoints .wp-row .name { flex: 1; color: var(--text); }
+.saved-waypoints .wp-row button {
+  margin: 0;
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
 /* compare mode */
 body.compare-mode #split {
   position: fixed;

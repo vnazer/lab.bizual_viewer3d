@@ -6,8 +6,14 @@ import {
   HDRI_PRESETS, DEFAULT_HDRI_ID,
   applyAnisotropy, getMaterialsInfo, getExtensions, calculateVRAM,
   isolateMaterial, setWireframe,
-} from './scene.js?v=20260505';
-import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260505';
+} from './scene.js?v=20260506';
+import { FirstPersonController, setupBVH, disposeBVH, BVH_AVAILABLE } from './navigation.js?v=20260506';
+import {
+  detectModelType, computeBuildingWaypoints, computeUnitWaypointsFallback,
+  CameraController, rotateOrbit, snapshotPose,
+  loadWaypointsForFile, saveWaypointsForFile, clearWaypointsForFile,
+  formatWaypointJSON, parseWaypointJSON, UNIT_WAYPOINT_SLOTS,
+} from './waypoints.js?v=20260506';
 
 // localStorage prefix for all persisted lab preferences.
 const LS_PREFIX = 'bizual_lab_';
@@ -47,6 +53,16 @@ const loader = getGLTFLoader(renderer);
 window.__camera = camera;
 window.__controls = controls;
 console.log('[lab] globals ready:', { renderer: !!window.__renderer, scene: !!window.__scene, sun: !!window.__sunLight, ambient: !!window.__ambientLight });
+
+// Pause autoRotate + cancel any in-flight lerp the moment the user drags.
+controls.addEventListener('start', () => {
+  if (typeof setAutoRotate === 'function') setAutoRotate(false);
+  // (cameraCtrl may not exist yet at this point — guard below)
+  if (typeof cameraCtrl !== 'undefined' && cameraCtrl.isFlying()) cameraCtrl.cancel();
+  // Clear "active" highlight from view buttons.
+  document.querySelectorAll('.view-grid button.active').forEach((b) => b.classList.remove('active'));
+  if (typeof activeWaypointId !== 'undefined') activeWaypointId = null;
+});
 
 // First-person controller (lazy-enabled when user switches mode).
 const fpsController = new FirstPersonController(camera, renderer.domElement);
@@ -106,6 +122,121 @@ function setNavMode(mode, { fromUser = true } = {}) {
   if (badge) badge.textContent = mode === 'fps' ? 'Interior' : 'Exterior';
 }
 window.__setNavMode = setNavMode;
+
+// ────────────────────────────────────────────────────────────────────
+// Waypoint navigation (T14 unidad / T15 edificio)
+// ────────────────────────────────────────────────────────────────────
+const cameraCtrl = new CameraController(camera, controls);
+window.__cameraCtrl = cameraCtrl;
+
+let modelTypeOverride = ls.get('modelType', 'auto'); // 'auto' | 'edificio' | 'unidad' | 'mixto'
+let activeModelType = 'unidad'; // resolved type currently in use
+let buildingWaypoints = [];
+let unitWaypoints = [];
+let activeWaypointId = null;
+let isAutoRotating = false;
+let currentModelUrl = null;
+
+function resolveModelType(model) {
+  if (modelTypeOverride && modelTypeOverride !== 'auto') return modelTypeOverride;
+  return detectModelType(model);
+}
+
+function refreshWaypoints() {
+  if (!currentModel) return;
+  activeModelType = resolveModelType(currentModel);
+  buildingWaypoints = computeBuildingWaypoints(currentModel);
+  // Unit: custom saved waypoints take priority over fallback.
+  const saved = loadWaypointsForFile(currentModelUrl);
+  unitWaypoints = saved.length ? saved : computeUnitWaypointsFallback(currentModel);
+
+  const badge = $('model-type-badge');
+  if (badge) badge.textContent = activeModelType.charAt(0).toUpperCase() + activeModelType.slice(1);
+
+  const showBuild = activeModelType === 'edificio' || activeModelType === 'mixto';
+  const showUnit  = activeModelType === 'unidad'   || activeModelType === 'mixto';
+  $('views-edificio').style.display = showBuild ? '' : 'none';
+  $('views-unidad').style.display   = showUnit  ? '' : 'none';
+
+  renderViewGrid('views-edificio-grid', buildingWaypoints, (w) => goToWaypoint(w));
+  renderViewGrid('views-unidad-grid',   unitWaypoints,     (w) => goToWaypoint(w));
+  renderSavedWaypoints();
+
+  // Apply default per type.
+  if (showBuild && navMode === 'orbit') {
+    const isoBuild = buildingWaypoints.find((w) => w.id === 'iso');
+    if (isoBuild) goToWaypoint(isoBuild);
+    setAutoRotate(true);
+  } else if (showUnit && navMode === 'orbit') {
+    const isoUnit = unitWaypoints.find((w) => w.id === 'iso') || unitWaypoints[0];
+    if (isoUnit) goToWaypoint(isoUnit);
+    setAutoRotate(false);
+  }
+}
+
+function renderViewGrid(elId, waypoints, onClick) {
+  const el = $(elId);
+  if (!el) return;
+  el.innerHTML = '';
+  waypoints.forEach((w) => {
+    const btn = document.createElement('button');
+    btn.dataset.wpId = w.id;
+    btn.textContent = `${w.icono || '•'} ${w.label}`;
+    btn.title = w.label;
+    if (activeWaypointId === w.id) btn.classList.add('active');
+    btn.addEventListener('click', () => onClick(w));
+    el.appendChild(btn);
+  });
+}
+
+function goToWaypoint(w) {
+  if (!w || navMode !== 'orbit') return;
+  setAutoRotate(false);
+  activeWaypointId = w.id;
+  cameraCtrl.flyTo(w.position, w.target, () => { /* arrived */ });
+  // Highlight active
+  document.querySelectorAll('.view-grid button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.wpId === w.id);
+  });
+}
+
+function setAutoRotate(on) {
+  isAutoRotating = !!on;
+  controls.autoRotate = isAutoRotating;
+  controls.autoRotateSpeed = 1.0; // ~ π/30 rad/s ≈ 0.1 rad/s, ≈ 60s/vuelta
+  const btn = $('btn-autorotate');
+  if (btn) {
+    btn.classList.toggle('active', isAutoRotating);
+    btn.textContent = isAutoRotating ? '⏸ Pausar auto-rotate' : '▶ Auto-rotate';
+  }
+}
+
+function renderSavedWaypoints() {
+  const container = $('wp-saved-list');
+  if (!container) return;
+  const saved = loadWaypointsForFile(currentModelUrl);
+  if (!saved.length) {
+    container.innerHTML = '<em class="hint">Ninguno todavía.</em>';
+    return;
+  }
+  container.innerHTML = '';
+  saved.forEach((w) => {
+    const row = document.createElement('div');
+    row.className = 'wp-row';
+    row.innerHTML = `
+      <span class="name">${escapeHtml(w.icono || '•')} ${escapeHtml(w.label || w.id)}</span>
+      <button data-act="go">↗ Ir</button>
+      <button data-act="del">×</button>
+    `;
+    row.querySelector('[data-act="go"]').addEventListener('click', () => goToWaypoint(w));
+    row.querySelector('[data-act="del"]').addEventListener('click', () => {
+      const next = saved.filter((x) => x.id !== w.id);
+      saveWaypointsForFile(currentModelUrl, next);
+      refreshWaypoints();
+    });
+    container.appendChild(row);
+  });
+}
 
 let envTex = null;
 let currentModel = null;
@@ -235,6 +366,8 @@ async function loadModel(url) {
     currentGLTF = gltf;
     fpsController.setCollisionRoot(root);
     if (bvh.available) console.log(`[lab] BVH built for ${bvh.meshes} meshes`);
+    currentModelUrl = url;
+    refreshWaypoints();
     window.__currentModel = root;
     window.__currentGLTF = gltf;
     frameObject(root, camera, controls);
@@ -572,6 +705,142 @@ const _navPoll = setInterval(() => {
   if (currentModel) { _checkNavInit(); clearInterval(_navPoll); }
 }, 250);
 
+// ────────────────────────────────────────────────────────────────────
+// Vistas / Waypoints panel wiring (T14 + T15 + Editor)
+// ────────────────────────────────────────────────────────────────────
+
+// Model type override
+const modelTypeSelect = $('model-type-select');
+if (modelTypeSelect) {
+  modelTypeSelect.value = modelTypeOverride;
+  modelTypeSelect.addEventListener('change', (e) => {
+    modelTypeOverride = e.target.value;
+    ls.set('modelType', modelTypeOverride);
+    if (currentModel) refreshWaypoints();
+  });
+}
+
+// Arrow pad — discrete 0.1 rad rotation per click
+const ARROW_STEP = 0.1;
+document.querySelectorAll('.arrow-pad button[data-arrow]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (cameraCtrl.isFlying()) cameraCtrl.cancel();
+    setAutoRotate(false);
+    const a = btn.dataset.arrow;
+    if (a === 'up')        rotateOrbit(camera, controls, 0, -ARROW_STEP);
+    else if (a === 'down') rotateOrbit(camera, controls, 0,  ARROW_STEP);
+    else if (a === 'left') rotateOrbit(camera, controls, -ARROW_STEP, 0);
+    else if (a === 'right')rotateOrbit(camera, controls,  ARROW_STEP, 0);
+    else if (a === 'reset' && currentModel) {
+      const iso = (activeModelType === 'edificio' ? buildingWaypoints : unitWaypoints)
+        .find((w) => w.id === 'iso');
+      if (iso) goToWaypoint(iso);
+    }
+  });
+});
+
+// AutoRotate toggle
+$('btn-autorotate')?.addEventListener('click', () => setAutoRotate(!isAutoRotating));
+
+// Reset buttons (per-section)
+$('btn-reset-edificio')?.addEventListener('click', () => {
+  if (!currentModel) return;
+  const iso = buildingWaypoints.find((w) => w.id === 'iso');
+  if (iso) goToWaypoint(iso);
+  setAutoRotate(true);
+});
+$('btn-reset-unidad')?.addEventListener('click', () => {
+  if (!currentModel) return;
+  const iso = unitWaypoints.find((w) => w.id === 'iso') || unitWaypoints[0];
+  if (iso) goToWaypoint(iso);
+});
+
+// Keyboard: 1–6 = waypoint, R = reset, Space = pause/play autoRotate
+window.addEventListener('keydown', (e) => {
+  const tag = (e.target?.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (navMode !== 'orbit' || !currentModel) return;
+  const list = activeModelType === 'edificio' ? buildingWaypoints : unitWaypoints;
+  if (e.key >= '1' && e.key <= '9') {
+    const idx = parseInt(e.key, 10) - 1;
+    if (list[idx]) goToWaypoint(list[idx]);
+  } else if (e.key === 'r' || e.key === 'R') {
+    const iso = list.find((w) => w.id === 'iso') || list[0];
+    if (iso) goToWaypoint(iso);
+  } else if (e.code === 'Space' && activeModelType === 'edificio') {
+    e.preventDefault();
+    setAutoRotate(!isAutoRotating);
+  }
+});
+
+// ── Waypoint editor ──────────────────────────────────────────────
+const wpEditMode = $('wp-edit-mode');
+const wpSaveSlots = $('wp-save-slots');
+
+function renderEditorSlots() {
+  if (!wpSaveSlots) return;
+  wpSaveSlots.innerHTML = '';
+  if (!wpEditMode?.checked) return;
+  UNIT_WAYPOINT_SLOTS.forEach((slot) => {
+    const btn = document.createElement('button');
+    btn.textContent = `💾 ${slot.icono} ${slot.label}`;
+    btn.title = `Guardar pose actual como ${slot.label}`;
+    btn.addEventListener('click', () => {
+      if (!currentModelUrl) return;
+      const pose = snapshotPose(camera, controls);
+      const saved = loadWaypointsForFile(currentModelUrl);
+      const next = saved.filter((w) => w.id !== slot.id);
+      next.push({ id: slot.id, label: slot.label, icono: slot.icono, ...pose });
+      saveWaypointsForFile(currentModelUrl, next);
+      refreshWaypoints();
+    });
+    wpSaveSlots.appendChild(btn);
+  });
+}
+
+if (wpEditMode) {
+  wpEditMode.addEventListener('change', renderEditorSlots);
+}
+
+$('wp-copy-json')?.addEventListener('click', async () => {
+  const saved = loadWaypointsForFile(currentModelUrl);
+  if (!saved.length) {
+    alert('No hay waypoints guardados para este archivo.');
+    return;
+  }
+  const json = formatWaypointJSON(saved);
+  try {
+    await navigator.clipboard.writeText(json);
+    const btn = $('wp-copy-json');
+    const old = btn.textContent;
+    btn.textContent = '✓ Copiado';
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  } catch (err) {
+    // Fallback: open a prompt with the JSON.
+    prompt('Copiá manualmente el JSON:', json);
+  }
+});
+
+$('wp-clear-all')?.addEventListener('click', () => {
+  if (!confirm('¿Borrar todos los waypoints guardados de este archivo?')) return;
+  clearWaypointsForFile(currentModelUrl);
+  refreshWaypoints();
+});
+
+$('wp-import')?.addEventListener('click', () => {
+  const text = prompt('Pegá el JSON exportado del SaaS o de otro lab:');
+  if (!text) return;
+  try {
+    const list = parseWaypointJSON(text);
+    saveWaypointsForFile(currentModelUrl, list);
+    refreshWaypoints();
+    alert(`Importados ${list.length} waypoints.`);
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+});
+
 // Custom HDRI upload
 $('btn-hdri').addEventListener('click', () => $('hdri-input').click());
 $('hdri-input').addEventListener('change', async (e) => {
@@ -627,7 +896,13 @@ function animate() {
   if (navMode === 'fps') {
     fpsController.update(delta);
   } else {
-    controls.update();
+    if (cameraCtrl.isFlying()) {
+      controls.enabled = false;
+      cameraCtrl.update();
+    } else {
+      controls.enabled = true;
+      controls.update();
+    }
   }
   // WebGPURenderer exposes renderAsync; WebGLRenderer uses render
   if (typeof renderer.renderAsync === 'function') {
