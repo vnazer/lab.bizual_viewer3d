@@ -64,6 +64,19 @@ window.__camera = camera;
 window.__controls = controls;
 console.log('[lab] globals ready:', { renderer: !!window.__renderer, scene: !!window.__scene, sun: !!window.__sunLight, ambient: !!window.__ambientLight });
 
+// "Linterna" parentada a la cámara para iluminar cuartos interiores cerrados
+// (baños, dormitorios sin ventana) donde ni el sol ni el HDRI llegan dentro.
+// Solo se enciende en modo FPS — en orbit/exterior queda apagada para no
+// alterar el look con HDRI + sun. La cámara tiene que estar en el grafo de
+// la scene para que los hijos rendericen, por eso scene.add(camera).
+scene.add(camera);
+const fpHeadlamp = new THREE.PointLight(0xfff1d6, 0.0, 8.0, 1.8);
+fpHeadlamp.position.set(0, -0.1, -0.15); // levemente al frente y debajo de los ojos
+fpHeadlamp.castShadow = false; // sin sombras para no impactar perf en FPS
+fpHeadlamp.visible = false;
+camera.add(fpHeadlamp);
+window.__fpHeadlamp = fpHeadlamp;
+
 // Pause autoRotate + cancel any in-flight lerp the moment the user drags.
 controls.addEventListener('start', () => {
   if (typeof setAutoRotate === 'function') setAutoRotate(false);
@@ -113,12 +126,19 @@ function setNavMode(mode, { fromUser = true } = {}) {
     fpsController.enable();
     document.body.classList.add('nav-fps');
     $('fps-crosshair')?.classList.remove('hidden');
+    // Encender linterna para evitar que baños/cuartos cerrados queden negros
+    // (el sol y el HDRI no penetran paredes; sin esto el FPS es injugable).
+    fpHeadlamp.intensity = 2.5;
+    fpHeadlamp.visible = true;
   } else {
     fpsController.disable();
     document.body.classList.remove('nav-fps');
     $('fps-crosshair')?.classList.add('hidden');
     controls.enabled = true;
     if (fromUser) restoreOrbit();
+    // Apagar linterna al volver a exterior — el look orbital usa HDRI+sun puros.
+    fpHeadlamp.visible = false;
+    fpHeadlamp.intensity = 0;
   }
   navMode = mode;
   ls.set('navMode', mode);
