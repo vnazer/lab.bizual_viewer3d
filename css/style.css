@@ -1379,3 +1379,31 @@ body.compare-mode .pane-hud .stats {
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   }
 }
+
+/* ── Model manager modal ───────────────────────────────────── */
+.mm-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  padding: 4px;
+  background: rgba(0,0,0,0.2);
+}
+.mm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.mm-row:hover { background: rgba(255,255,255,0.06); }
+.mm-row.in-use { opacity: 0.55; }
+.mm-row input[type="checkbox"] { cursor: pointer; }
+.mm-row .mm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-row .mm-size { color: rgba(255,255,255,0.5); font-variant-numeric: tabular-nums; font-size: 11px; }
+.mm-row .mm-badge { background: rgba(59,130,246,0.25); color: #93c5fd; font-size: 10px; padding: 1px 6px; border-radius: 999px; }
+.mm-status { margin-top: 8px; font-size: 12px; }
+.mm-status.ok    { color: #86efac; }
+.mm-status.err   { color: #fca5a5; }

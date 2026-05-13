@@ -1949,6 +1949,151 @@ window.addEventListener('drop', (e) => {
 });
 
 // ────────────────────────────────────────────────────────────────────
+// Model manager (delete) — abre modal con lista de GLBs en /models/ y
+// permite borrarlos en lote vía delete.php. Mismo token que upload.
+// ────────────────────────────────────────────────────────────────────
+const btnManageModels = $('btn-manage-models');
+const modalModels = $('modal-models');
+const mmList = $('mm-list');
+const mmStatus = $('mm-status');
+const mmDeleteBtn = $('mm-delete-selected');
+const mmFilter = $('mm-filter');
+
+function mmSetStatus(text, kind = '') {
+  if (!mmStatus) return;
+  mmStatus.textContent = text || '';
+  mmStatus.className = 'mm-status' + (kind ? ' ' + kind : '');
+  mmStatus.classList.toggle('hidden', !text);
+}
+
+function mmUpdateDeleteBtn() {
+  if (!mmDeleteBtn) return;
+  const n = mmList.querySelectorAll('input[type="checkbox"]:checked').length;
+  mmDeleteBtn.disabled = n === 0;
+  mmDeleteBtn.textContent = n > 0 ? `Eliminar ${n} archivo${n > 1 ? 's' : ''}` : 'Eliminar seleccionados';
+}
+
+async function mmRefresh() {
+  if (!mmList) return;
+  mmList.innerHTML = '<em>Cargando…</em>';
+  mmSetStatus('');
+  let models;
+  try {
+    models = await fetchManifest();
+  } catch (err) {
+    mmList.innerHTML = '<em>Error cargando lista</em>';
+    return;
+  }
+  if (!models.length) {
+    mmList.innerHTML = '<em>No hay archivos en /models/</em>';
+    mmUpdateDeleteBtn();
+    return;
+  }
+  // Ordenar por nombre asc para gestión más cómoda
+  models.sort((a, b) => (a.name || a.url || '').localeCompare(b.name || b.url || ''));
+  mmList.innerHTML = '';
+  models.forEach((m) => {
+    const name = m.name || (m.url || '').split('/').pop();
+    const size = typeof m.size === 'number' ? formatBytes(m.size) : '';
+    const inUse = currentModelUrl && (currentModelUrl === m.url || currentModelUrl.endsWith('/' + name));
+    const row = document.createElement('label');
+    row.className = 'mm-row' + (inUse ? ' in-use' : '');
+    row.innerHTML = `
+      <input type="checkbox" data-name="${name}" ${inUse ? 'disabled' : ''}>
+      <span class="mm-name" title="${name}">${name}</span>
+      ${inUse ? '<span class="mm-badge">EN USO</span>' : ''}
+      <span class="mm-size">${size}</span>
+    `;
+    mmList.appendChild(row);
+  });
+  mmFilter && (mmFilter.value = '');
+  mmUpdateDeleteBtn();
+}
+
+function mmOpen() {
+  if (!modalModels) return;
+  $('modal-overlay')?.classList.remove('hidden');
+  modalModels.classList.remove('hidden');
+  mmRefresh();
+}
+function mmClose() {
+  modalModels?.classList.add('hidden');
+  // Si no quedan modales abiertos, ocultar overlay
+  const anyOpen = document.querySelectorAll('#modal-overlay .modal:not(.hidden)').length;
+  if (!anyOpen) $('modal-overlay')?.classList.add('hidden');
+}
+
+btnManageModels?.addEventListener('click', mmOpen);
+modalModels?.querySelectorAll('[data-close]').forEach((el) => el.addEventListener('click', mmClose));
+mmList?.addEventListener('change', mmUpdateDeleteBtn);
+
+$('mm-select-all')?.addEventListener('click', () => {
+  mmList.querySelectorAll('input[type="checkbox"]:not(:disabled)').forEach((cb) => {
+    // Solo marcar los visibles (si hay filtro activo)
+    if (cb.closest('.mm-row').style.display !== 'none') cb.checked = true;
+  });
+  mmUpdateDeleteBtn();
+});
+$('mm-select-none')?.addEventListener('click', () => {
+  mmList.querySelectorAll('input[type="checkbox"]').forEach((cb) => (cb.checked = false));
+  mmUpdateDeleteBtn();
+});
+
+mmFilter?.addEventListener('input', () => {
+  const q = mmFilter.value.trim().toLowerCase();
+  mmList.querySelectorAll('.mm-row').forEach((row) => {
+    const name = row.querySelector('.mm-name')?.textContent.toLowerCase() || '';
+    row.style.display = !q || name.includes(q) ? '' : 'none';
+  });
+});
+
+mmDeleteBtn?.addEventListener('click', async () => {
+  const checked = Array.from(mmList.querySelectorAll('input[type="checkbox"]:checked'));
+  const files = checked.map((cb) => cb.dataset.name).filter(Boolean);
+  if (!files.length) return;
+
+  if (!confirm(`¿Eliminar ${files.length} archivo${files.length > 1 ? 's' : ''} de /models/?\n\nEsta acción NO se puede deshacer.`)) return;
+
+  const token = getToken();
+  if (!token) return;
+
+  mmDeleteBtn.disabled = true;
+  mmSetStatus('Eliminando…');
+
+  try {
+    const res = await fetch('./delete.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Upload-Token': token },
+      body: JSON.stringify({ files }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (res.status === 401) {
+        clearToken();
+        mmSetStatus('Token inválido — se borró. Reintentá.', 'err');
+      } else {
+        mmSetStatus(data.error || `HTTP ${res.status}`, 'err');
+      }
+      mmDeleteBtn.disabled = false;
+      return;
+    }
+    const okN = (data.deleted || []).length;
+    const failN = (data.failed || []).length;
+    let msg = `✓ ${okN} eliminado${okN === 1 ? '' : 's'}`;
+    if (failN) msg += ` · ${failN} con error`;
+    mmSetStatus(msg, failN ? 'err' : 'ok');
+    if (failN) console.warn('[delete] fallaron:', data.failed);
+    // Refrescar lista del modal y dropdown principal
+    await mmRefresh();
+    await populateModels();
+  } catch (err) {
+    console.error('[delete] error', err);
+    mmSetStatus('Error de red: ' + err.message, 'err');
+    mmDeleteBtn.disabled = false;
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────
 // Floating viewport controls (bottom-right stack)
 // ────────────────────────────────────────────────────────────────────
 function zoomViewport(deltaUnits) {

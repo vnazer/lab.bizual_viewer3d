@@ -42,6 +42,7 @@
       <label class="row">
         <span>Archivo</span>
         <select id="model-select"><option value="">— cargando —</option></select>
+        <button id="btn-manage-models" title="Gestionar archivos en /models/" style="margin-left:6px;">🗑️</button>
       </label>
       <label class="row">
         <span>URL externa</span>
@@ -373,6 +374,27 @@
       </div>
     </div>
 
+    <!-- Model manager modal -->
+    <div id="modal-models" class="modal hidden">
+      <div class="modal-head">
+        <strong>Gestionar modelos en /models/</strong>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="modal-body">
+        <div class="row" style="margin-bottom:8px; gap:8px;">
+          <button id="mm-select-all" class="modal-btn-secondary">Marcar todo</button>
+          <button id="mm-select-none" class="modal-btn-secondary">Desmarcar</button>
+          <input id="mm-filter" type="text" placeholder="Filtrar por nombre…" style="flex:1;" />
+        </div>
+        <div id="mm-list" class="mm-list"><em>Cargando…</em></div>
+        <div id="mm-status" class="mm-status hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button data-close class="modal-btn-secondary">Cerrar</button>
+        <button id="mm-delete-selected" class="modal-btn-primary" disabled>Eliminar seleccionados</button>
+      </div>
+    </div>
+
     <!-- Map embed modal -->
     <div id="modal-map" class="modal hidden modal-large">
       <div class="modal-head">
@@ -390,6 +412,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/viewer.js?v=20260523"></script>
+  <script type="module" src="./js/viewer.js?v=20260524"></script>
 </body>
 </html>
