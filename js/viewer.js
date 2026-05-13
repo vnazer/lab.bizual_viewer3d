@@ -248,7 +248,11 @@ function renderViewGrid(elId, waypoints, onClick) {
 }
 
 function goToWaypoint(w) {
-  if (!w || navMode !== 'orbit') return;
+  if (!w) return;
+  // Playback es orbit-based. Si estamos en interior (FPS), salir antes de volar:
+  // de lo contrario el FirstPersonController sigue corriendo y pelea con el lerp
+  // del CameraController (jitter, clamp Y, rotación que no llega al target).
+  if (navMode === 'fps') setNavMode('orbit', { fromUser: false });
   setAutoRotate(false);
   activeWaypointId = w.id;
   cameraCtrl.flyTo(w.position, w.target, () => { /* arrived */ });
@@ -1597,7 +1601,21 @@ function renderEditorSlots() {
     btn.title = `Guardar pose actual como ${slot.label}`;
     btn.addEventListener('click', () => {
       if (!currentModelUrl) return;
-      const pose = snapshotPose(camera, controls);
+      // En FPS (interior), controls.target está congelado en el último pivot
+      // orbit, así que snapshotPose graba un target inservible. Derivar el
+      // target real desde la dirección de la cámara FP (1m hacia adelante).
+      let pose;
+      if (navMode === 'fps') {
+        const _dir = new THREE.Vector3();
+        camera.getWorldDirection(_dir);
+        const _look = camera.position.clone().add(_dir);
+        pose = {
+          position: camera.position.toArray().map((v) => +v.toFixed(3)),
+          target:   _look.toArray().map((v) => +v.toFixed(3)),
+        };
+      } else {
+        pose = snapshotPose(camera, controls);
+      }
       const saved = loadWaypoints(scope, currentModelUrl);
       const next = saved.filter((w) => w.id !== slot.id);
       next.push({ id: slot.id, label: slot.label, icono: slot.icono, ...pose });
