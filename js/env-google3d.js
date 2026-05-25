@@ -267,6 +267,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sR = parseFloat(localStorage.getItem('bizual_g3d_rot')   || 0);
   const sA = parseFloat(localStorage.getItem('bizual_g3d_alt')   || 0);
   const sS = parseFloat(localStorage.getItem('bizual_g3d_scale') || 1);
+  const sQ = parseFloat(localStorage.getItem('bizual_g3d_quality') || 14);
   panel.innerHTML = `
     <div class="g3d-header">
       <div class="g3d-title">
@@ -293,6 +294,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         <label>📐 Escala
           <input type="range" id="g3d-scale" min="0.1" max="3"   step="0.05" value="${sS}">
           <span id="g3d-scale-val">${sS}×</span>
+        </label>
+        <label title="errorTarget: menor = más detalle (más pesado), mayor = más liviano">🎯 Calidad
+          <input type="range" id="g3d-quality" min="8" max="24" step="1" value="${sQ}">
+          <span id="g3d-quality-val">${sQ}</span>
         </label>
       </div>
       <div class="g3d-quality">
@@ -365,11 +370,37 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   tiles.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader: makeDraco() }));
   tiles.registerPlugin(new UnloadTilesPlugin());
   tiles.registerPlugin(new TileCompressionPlugin());
+
+  // Quality / network budget. errorTarget drives screen-space error: lower =
+  // more detail (heavier), higher = lighter. Cache + queue sizes are bounded so
+  // a long session doesn't saturate memory or the network.
+  tiles.errorTarget = sQ;
+  tiles.lruCache.minSize = 600;
+  tiles.lruCache.maxSize = 900;
+  tiles.downloadQueue.maxJobs = 10;
+  tiles.parseQueue.maxJobs = 5;
+
   tiles.setCamera(camera);
   tiles.setResolutionFromRenderer(camera, renderer);
   scene.add(tiles.group);
   _activeTiles = tiles;
   window.__tiles = tiles;
+
+  // Dynamic attribution — Google's data credits are required by the Maps
+  // Platform TOS and change with the tiles in view, so read them from the
+  // plugin instead of hardcoding. Falls back to the static text until tiles
+  // become visible (getAttributions only reports while visibleTiles > 0).
+  const attribEl = panel.querySelector('.g3d-attribution');
+  function updateAttribution() {
+    const target = [];
+    try { tiles.getAttributions(target); } catch {}
+    if (!target.length) return;
+    attribEl.innerHTML = target.map((a) =>
+      a.type === 'image'
+        ? `<img src="${escapeAttr(a.value)}" alt="Google" style="height:14px;vertical-align:middle">`
+        : escapeAttr(a.value)
+    ).join(' · ');
+  }
 
   console.log('[Google 3D] init', {
     rootURL: tiles.rootURL,
@@ -397,6 +428,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   // Periodic stats — uses the actual property names from 0.4.7.
   const _statsInterval = setInterval(() => {
+    updateAttribution();
     if (!tiles?.stats) return;
     const s = tiles.stats;
     console.log('[Google 3D] stats:', {
@@ -516,10 +548,20 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   bindSlider('g3d-alt',   'g3d-alt-val',   1, ' m', (v) => altOffset = v);
   bindSlider('g3d-scale', 'g3d-scale-val', 2, '×',  (v) => scaleMx = v);
 
+  let qualityVal = sQ;
+  const qInp = document.getElementById('g3d-quality');
+  const qOut = document.getElementById('g3d-quality-val');
+  qInp.addEventListener('input', (e) => {
+    qualityVal = parseFloat(e.target.value);
+    qOut.textContent = String(qualityVal);
+    tiles.errorTarget = qualityVal;
+  });
+
   document.getElementById('g3d-save').addEventListener('click', () => {
-    localStorage.setItem('bizual_g3d_rot',   String(rotDeg));
-    localStorage.setItem('bizual_g3d_alt',   String(altOffset));
-    localStorage.setItem('bizual_g3d_scale', String(scaleMx));
+    localStorage.setItem('bizual_g3d_rot',     String(rotDeg));
+    localStorage.setItem('bizual_g3d_alt',     String(altOffset));
+    localStorage.setItem('bizual_g3d_scale',   String(scaleMx));
+    localStorage.setItem('bizual_g3d_quality', String(qualityVal));
     const btn = document.getElementById('g3d-save');
     btn.textContent = '✅ Guardado';
     setTimeout(() => { btn.textContent = '💾 Guardar ajustes'; }, 1500);
