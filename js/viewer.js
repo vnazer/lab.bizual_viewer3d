@@ -2300,6 +2300,19 @@ if (addressInput) {
   addressInput.value = ls.get('proyecto_direccion', '');
   addressInput.addEventListener('change', (e) => ls.set('proyecto_direccion', e.target.value.trim()));
   addressInput.addEventListener('blur',   (e) => ls.set('proyecto_direccion', e.target.value.trim()));
+
+  // Google Places Autocomplete — exact lat/lng for the 3D viewer instead of
+  // geocoding free text. Only if a key is already stored (set it once via the
+  // Google 3D dialog, then reload). Plain field + OSM fallback otherwise.
+  const _gkey = localStorage.getItem('bizual_google_maps_key') || '';
+  if (_gkey) {
+    import('./places-autocomplete.js?v=20260525')
+      .then(({ initAddressAutocomplete }) =>
+        initAddressAutocomplete(addressInput, _gkey, (coords) => {
+          ls.set('proyecto_direccion', coords.display);
+        }))
+      .catch((err) => console.warn('[places] autocomplete no disponible (se usará OSM):', err.message));
+  }
 }
 
 const MAP_MODE_BUILDERS = {
@@ -2375,9 +2388,13 @@ $('btn-show-g3d')?.addEventListener('click', async () => {
     return;
   }
   try {
-    // Geocode using mapbox-env's helper (no token required, OSM Nominatim).
-    const mb = await import('./mapbox-env.js?v=20260519');
-    const coords = await mb.geocodeAddress(addr);
+    // Prefer the exact coords from a Places pick; fall back to OSM geocoding.
+    const pa = await import('./places-autocomplete.js?v=20260525');
+    let coords = pa.resolvePickedCoords(addr);
+    if (!coords) {
+      const mb = await import('./mapbox-env.js?v=20260519');
+      coords = await mb.geocodeAddress(addr);
+    }
     const g3d = await import('./env-google3d.js?v=20260519');
     _envHandleG3d = await g3d.openGoogle3DPanel(coords, _modelForEnv());
   } catch (err) {
