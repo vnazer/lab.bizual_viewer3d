@@ -1,5 +1,5 @@
 // Google Photorealistic 3D Tiles + GLB del edificio.
-// Library: https://github.com/NASA-AMMOS/3DTilesRendererJS (loaded via esm.sh)
+// Library: https://github.com/NASA-AMMOS/3DTilesRendererJS (bundled in /libs/3dtiles/)
 // API key: stored in localStorage[bizual_google_maps_key]; first run prompts.
 
 import * as THREE from 'three';
