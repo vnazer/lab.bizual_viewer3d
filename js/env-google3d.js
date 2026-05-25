@@ -108,6 +108,7 @@ export function closeGoogle3DPanel() {
   if (_resizeObs) { _resizeObs.disconnect(); _resizeObs = null; }
   if (_activeTiles) {
     if (_activeTiles._statsInterval) clearInterval(_activeTiles._statsInterval);
+    if (_activeTiles._anchorInterval) clearInterval(_activeTiles._anchorInterval);
     try { _activeTiles.dispose(); } catch {}
     _activeTiles = null;
   }
@@ -317,7 +318,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const { W, H } = fitSize();
 
   const camera = new THREE.PerspectiveCamera(60, W / H, 1, 160_000_000);
-  const initPos = latLonToECEF(lat, lon, 500);
+  const initPos = latLonToECEF(lat, lon, 3000);
   camera.position.copy(initPos);
   camera.up.copy(initPos.clone().normalize());
   camera.lookAt(latLonToECEF(lat, lon, 0));
@@ -427,10 +428,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   controls.dampingFactor = 0.05;
   controls.screenSpacePanning = false;
 
-  // Smooth zoom-in to ~400m above the target
-  setTimeout(() => {
-    animateCameraTo(camera, controls, latLonToECEF(lat, lon, 400), latLonToECEF(lat, lon, 0), 2000);
-  }, 400);
+  // Camera framing is driven by ground anchoring (tryAnchorGround) once the
+  // tiles under the target have loaded — see below.
 
   // ─── HDRI environment + sun (synced from lab's sun_hour) ────────────────
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -482,15 +481,58 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   let altOffset = sA;
   let scaleMx   = sS;
 
+  // Local up (ellipsoid normal) at the target, and the ECEF point where the
+  // Google terrain actually sits — found by raycasting once tiles load. Until
+  // then we fall back to the ellipsoid surface (height 0), which in places like
+  // Santiago is hundreds of metres below the real ground, hence the float.
+  const _up = new THREE.Vector3();
+  WGS84_ELLIPSOID.getEastNorthUpAxes(lat * DEG2RAD, lon * DEG2RAD, new THREE.Vector3(), new THREE.Vector3(), _up);
+  let _groundAnchor = null;
+
   function applyGeoTransform() {
     if (!modelRoot) return;
-    const frame = getLocalFrameMatrix(lat, lon, altOffset);
+    const frame = new THREE.Matrix4();
+    if (_groundAnchor) {
+      // Keep the ENU orientation, but sit on the real terrain + altura offset.
+      WGS84_ELLIPSOID.getEastNorthUpFrame(lat * DEG2RAD, lon * DEG2RAD, frame);
+      frame.setPosition(_groundAnchor.clone().addScaledVector(_up, altOffset));
+    } else {
+      frame.copy(getLocalFrameMatrix(lat, lon, altOffset));
+    }
     const rotY = new THREE.Matrix4().makeRotationY(rotDeg * Math.PI / 180);
     const sM = new THREE.Matrix4().makeScale(scaleMx, scaleMx, scaleMx);
     modelRoot.matrix.copy(frame).multiply(rotY).multiply(sM);
     modelRoot.matrixAutoUpdate = false;
     modelRoot.matrixWorldNeedsUpdate = true;
   }
+
+  // Drop a ray from high above the target straight down onto the loaded Google
+  // tiles to find the real ground height, then re-anchor the model and frame
+  // the camera on it. Retries until tiles under the target exist.
+  const _groundRay = new THREE.Raycaster();
+  _groundRay.firstHitOnly = true;
+  function tryAnchorGround() {
+    if (_groundAnchor) return true;
+    if (!tiles.group || tiles.visibleTiles?.size === 0) return false;
+    _groundRay.set(latLonToECEF(lat, lon, 6000), _up.clone().negate());
+    const hits = _groundRay.intersectObject(tiles.group, false);
+    if (!hits.length) return false;
+    _groundAnchor = hits[0].point.clone();
+    applyGeoTransform();
+    controls.target.copy(_groundAnchor);
+    animateCameraTo(
+      camera, controls,
+      _groundAnchor.clone().addScaledVector(_up, 220),
+      _groundAnchor, 1400
+    );
+    console.log('[Google 3D] ✅ modelo anclado al terreno real (raycast hit)');
+    return true;
+  }
+  let _anchorTries = 0;
+  const _anchorInterval = setInterval(() => {
+    if (tryAnchorGround() || ++_anchorTries > 45) clearInterval(_anchorInterval);
+  }, 700);
+  tiles._anchorInterval = _anchorInterval;
 
   const loader = new GLTFLoader();
   loader.setDRACOLoader(makeDraco());
