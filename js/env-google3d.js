@@ -8,7 +8,7 @@ import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader }   from 'three/addons/loaders/DRACOLoader.js';
 import { RGBELoader }    from 'three/addons/loaders/RGBELoader.js';
 
-import { TilesRenderer } from '3d-tiles-renderer';
+import { TilesRenderer, WGS84_ELLIPSOID } from '3d-tiles-renderer';
 import {
   GoogleCloudAuthPlugin,
   GLTFExtensionsPlugin,
@@ -45,60 +45,38 @@ async function getActiveHDRIUrl() {
 function getGoogleApiKey() { return localStorage.getItem('bizual_google_maps_key') || ''; }
 function saveGoogleApiKey(k) { localStorage.setItem('bizual_google_maps_key', (k || '').trim()); }
 
-// ─── ECEF math ────────────────────────────────────────────────────────────
-const EARTH_RADIUS = 6_371_000;
+// ─── Geo math (WGS84 ellipsoid — the same model Google's tiles use) ─────────
+// A naive sphere (mean radius + geocentric latitude) misplaces the model by
+// ~20 km vs Google's geodetic tiles, so the building floats off the real
+// ground. Use the renderer's own ellipsoid for proper geodetic → ECEF.
+const DEG2RAD = Math.PI / 180;
 
 function latLonToECEF(lat, lon, altitudeM = 0) {
-  const R = EARTH_RADIUS + altitudeM;
-  const φ = lat * Math.PI / 180;
-  const λ = lon * Math.PI / 180;
-  return new THREE.Vector3(
-    R * Math.cos(φ) * Math.cos(λ),
-    R * Math.cos(φ) * Math.sin(λ),
-    R * Math.sin(φ)
-  );
+  const v = new THREE.Vector3();
+  WGS84_ELLIPSOID.getCartographicToPosition(lat * DEG2RAD, lon * DEG2RAD, altitudeM, v);
+  return v;
 }
 
-// Transform that places "local Y-up" coordinates at lat/lon + altitude in ECEF.
+// East-North-Up frame on the ellipsoid at lat/lon + altitude. Columns are
+// (east, north, up) — matches the local axis convention the GLB expects.
 function getLocalFrameMatrix(lat, lon, altitudeM = 0) {
-  const φ = lat * Math.PI / 180;
-  const λ = lon * Math.PI / 180;
-  const R = EARTH_RADIUS + altitudeM;
-
-  const pos = new THREE.Vector3(
-    R * Math.cos(φ) * Math.cos(λ),
-    R * Math.cos(φ) * Math.sin(λ),
-    R * Math.sin(φ)
-  );
-  const up = pos.clone().normalize();
-  const east = new THREE.Vector3(-Math.sin(λ), Math.cos(λ), 0).normalize();
-  const north = new THREE.Vector3().crossVectors(up, east).normalize();
-  east.crossVectors(north, up);
-
-  return new THREE.Matrix4().set(
-    east.x,  north.x,  up.x,  pos.x,
-    east.y,  north.y,  up.y,  pos.y,
-    east.z,  north.z,  up.z,  pos.z,
-    0, 0, 0, 1
-  );
+  const m = new THREE.Matrix4();
+  WGS84_ELLIPSOID.getEastNorthUpFrame(lat * DEG2RAD, lon * DEG2RAD, m);
+  if (altitudeM) m.setPosition(latLonToECEF(lat, lon, altitudeM));
+  return m;
 }
 
 function getSunDirectionECEF(lat, lon, azimutDeg, elevDeg) {
-  const φ = lat * Math.PI / 180;
-  const λ = lon * Math.PI / 180;
-  const az = azimutDeg * Math.PI / 180;
-  const el = elevDeg * Math.PI / 180;
-  const lx = Math.cos(el) * Math.sin(az);
-  const ly = Math.cos(el) * Math.cos(az);
-  const lz = Math.sin(el);
-  const up = new THREE.Vector3(Math.cos(φ) * Math.cos(λ), Math.cos(φ) * Math.sin(λ), Math.sin(φ));
-  const east = new THREE.Vector3(-Math.sin(λ), Math.cos(λ), 0).normalize();
-  const north = new THREE.Vector3().crossVectors(up, east).normalize();
-  east.crossVectors(north, up);
+  const east = new THREE.Vector3();
+  const north = new THREE.Vector3();
+  const up = new THREE.Vector3();
+  WGS84_ELLIPSOID.getEastNorthUpAxes(lat * DEG2RAD, lon * DEG2RAD, east, north, up);
+  const az = azimutDeg * DEG2RAD;
+  const el = elevDeg * DEG2RAD;
   return new THREE.Vector3()
-    .addScaledVector(east, lx)
-    .addScaledVector(north, ly)
-    .addScaledVector(up, lz)
+    .addScaledVector(east,  Math.cos(el) * Math.sin(az))
+    .addScaledVector(north, Math.cos(el) * Math.cos(az))
+    .addScaledVector(up,    Math.sin(el))
     .normalize();
 }
 
