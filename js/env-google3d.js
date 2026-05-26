@@ -537,16 +537,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   function tryAnchorGround() {
     if (_groundAnchor) return true;
     const visible = tiles.visibleTiles?.size || 0;
-    // Wait for the tileset to refine past the coarse global basemap (~1-6
-    // tiles); otherwise the raycast hits the ellipsoid-level mesh and the
-    // anchor lands ~600 m below Macul's real ground.
     if (!tiles.group || visible < 10) return false;
-    _groundRay.set(latLonToECEF(lat, lon, 6000), _up.clone().negate());
+    // Start the ray well above any possible terrain (covers Everest at 8.8 km)
+    // and cap its length so it can't punch through the planet and lock onto
+    // back-side geometry — which is what the -42 km elev hits were.
+    _groundRay.set(latLonToECEF(lat, lon, 15000), _up.clone().negate());
+    _groundRay.far = 25000;
     const hits = _groundRay.intersectObject(tiles.group, false);
     if (!hits.length) return false;
-    // Elevation above the ellipsoid at the hit point. If it's near 0 the
-    // raycast pierced the basemap, not the Maxar terrain — keep retrying.
     const elev = hits[0].point.length() - latLonToECEF(lat, lon, 0).length();
+    // Reject impossible elevations (basemap at 0, deep skirts, opposite-side
+    // tile artefacts). Real Earth: Dead Sea -430 m, Everest +8848 m.
+    if (elev < -500 || elev > 9000) {
+      console.log('[Google 3D] raycast hit fuera de rango (elev=' + elev.toFixed(1) + 'm); reintentando…');
+      return false;
+    }
     if (Math.abs(elev) < 5) {
       console.log('[Google 3D] raycast pegó al basemap (elev≈' + elev.toFixed(1) + 'm); esperando Maxar…');
       return false;
