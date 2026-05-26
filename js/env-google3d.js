@@ -244,7 +244,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const panel = document.createElement('div');
   panel.id = 'g3d-panel';
   const sR = parseFloat(localStorage.getItem('bizual_g3d_rot')   || 0);
-  const sA = parseFloat(localStorage.getItem('bizual_g3d_alt')   || 0);
+  // bizual_g3d_alt_v2 = ALTURA SOBRE EL SUELO (post ground-anchor). The old
+  // bizual_g3d_alt key was metres above the WGS84 ellipsoid and is now
+  // semantically wrong — ignore it so users don't inherit a stale +16 m offset.
+  const sA = parseFloat(localStorage.getItem('bizual_g3d_alt_v2') || 0);
   const sS = parseFloat(localStorage.getItem('bizual_g3d_scale') || 1);
   const sQ = parseFloat(localStorage.getItem('bizual_g3d_quality') || 14);
   panel.innerHTML = `
@@ -266,8 +269,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           <input type="range" id="g3d-rot"   min="0"   max="360" step="1"    value="${sR}">
           <span id="g3d-rot-val">${sR}°</span>
         </label>
-        <label>↕️ Altura
-          <input type="range" id="g3d-alt"   min="-10" max="30"  step="0.5"  value="${sA}">
+        <label title="Metros sobre el suelo real (Maxar). Negativo = hundir el modelo">↕️ Altura
+          <input type="range" id="g3d-alt"   min="-30" max="60"  step="0.5"  value="${sA}">
           <span id="g3d-alt-val">${sA} m</span>
         </label>
         <label>📐 Escala
@@ -538,25 +541,41 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     if (_groundAnchor) return true;
     const visible = tiles.visibleTiles?.size || 0;
     if (!tiles.group || visible < 10) return false;
-    // Start the ray well above any possible terrain (covers Everest at 8.8 km)
-    // and cap its length so it can't punch through the planet and lock onto
-    // back-side geometry — which is what the -42 km elev hits were.
-    _groundRay.set(latLonToECEF(lat, lon, 15000), _up.clone().negate());
-    _groundRay.far = 25000;
-    const hits = _groundRay.intersectObject(tiles.group, false);
-    if (!hits.length) return false;
-    const elev = hits[0].point.length() - latLonToECEF(lat, lon, 0).length();
-    // Reject impossible elevations (basemap at 0, deep skirts, opposite-side
-    // tile artefacts). Real Earth: Dead Sea -430 m, Everest +8848 m.
-    if (elev < -500 || elev > 9000) {
-      console.log('[Google 3D] raycast hit fuera de rango (elev=' + elev.toFixed(1) + 'm); reintentando…');
+
+    // East/north axes around the target so we can fan rays in a small grid.
+    const east  = new THREE.Vector3();
+    const north = new THREE.Vector3();
+    WGS84_ELLIPSOID.getEastNorthUpAxes(lat * DEG2RAD, lon * DEG2RAD, east, north, new THREE.Vector3());
+
+    // Multi-sample raycast: 9 rays in a 3×3 grid at ±30 m. We keep the LOWEST
+    // valid hit as the ground — a single straight-down ray often lands on a
+    // neighbouring rooftop in dense Maxar tiles, leaving the model hovering.
+    const baseOrigin = latLonToECEF(lat, lon, 15000);
+    const ellipsoidR = latLonToECEF(lat, lon, 0).length();
+    const dir = _up.clone().negate();
+    let bestHit = null;
+    let bestElev = Infinity;
+    let anyHit = false;
+    for (const dE of [-30, 0, 30]) {
+      for (const dN of [-30, 0, 30]) {
+        const origin = baseOrigin.clone().addScaledVector(east, dE).addScaledVector(north, dN);
+        _groundRay.set(origin, dir);
+        _groundRay.far = 25000;
+        const hits = _groundRay.intersectObject(tiles.group, false);
+        if (!hits.length) continue;
+        anyHit = true;
+        const elev = hits[0].point.length() - ellipsoidR;
+        if (elev < -500 || elev > 9000) continue;
+        if (elev < bestElev) { bestElev = elev; bestHit = hits[0].point.clone(); }
+      }
+    }
+    if (!bestHit) return false;
+    if (Math.abs(bestElev) < 5) {
+      console.log('[Google 3D] raycast pegó al basemap (elev≈' + bestElev.toFixed(1) + 'm); esperando Maxar…');
       return false;
     }
-    if (Math.abs(elev) < 5) {
-      console.log('[Google 3D] raycast pegó al basemap (elev≈' + elev.toFixed(1) + 'm); esperando Maxar…');
-      return false;
-    }
-    _groundAnchor = hits[0].point.clone();
+
+    _groundAnchor = bestHit;
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
     controls.target.copy(_groundAnchor);
@@ -565,8 +584,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _groundAnchor.clone().addScaledVector(_up, 220),
       _groundAnchor, 1400
     );
-    console.log('[Google 3D] ✅ modelo anclado al terreno real',
-                '· elev≈' + elev.toFixed(1) + 'm sobre elipsoide',
+    console.log('[Google 3D] ✅ modelo anclado (lowest de 9 rayos)',
+                '· elev≈' + bestElev.toFixed(1) + 'm sobre elipsoide',
                 '· visibleTiles=' + visible);
     return true;
   }
@@ -640,10 +659,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   });
 
   document.getElementById('g3d-save').addEventListener('click', () => {
-    localStorage.setItem('bizual_g3d_rot',     String(rotDeg));
-    localStorage.setItem('bizual_g3d_alt',     String(altOffset));
-    localStorage.setItem('bizual_g3d_scale',   String(scaleMx));
-    localStorage.setItem('bizual_g3d_quality', String(qualityVal));
+    localStorage.setItem('bizual_g3d_rot',      String(rotDeg));
+    localStorage.setItem('bizual_g3d_alt_v2',   String(altOffset));
+    localStorage.setItem('bizual_g3d_scale',    String(scaleMx));
+    localStorage.setItem('bizual_g3d_quality',  String(qualityVal));
     const btn = document.getElementById('g3d-save');
     btn.textContent = '✅ Guardado';
     setTimeout(() => { btn.textContent = '💾 Guardar ajustes'; }, 1500);
