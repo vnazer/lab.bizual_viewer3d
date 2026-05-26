@@ -281,7 +281,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       </div>
       <div class="g3d-quality">
         <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
-        <label><input type="checkbox" id="g3d-shadows" checked> Sombras</label>
+        <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
         <button id="g3d-save">💾 Guardar ajustes</button>
       </div>
     </div>
@@ -463,10 +463,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sunDir = getSunDirectionECEF(lat, lon, sunParams.azimut, sunParams.elevation);
   const sunLight = new THREE.DirectionalLight(sunParams.sunColor, Math.max(0.3, sunParams.sunIntensity));
   sunLight.position.copy(sunDir.clone().multiplyScalar(1e7));
-  sunLight.castShadow = true;
-  sunLight.shadow.mapSize.set(2048, 2048);
-  sunLight.shadow.camera.near = 1;
-  sunLight.shadow.camera.far = 1e8;
+  // Shadow mapping disabled for the Google 3D env: the light's shadow camera
+  // can't realistically cover a model at ECEF (~6.4e6 m from origin) without
+  // either being enormous (precision errors → WebGL "too many errors", broken
+  // context) or losing the model entirely. HDRI + direct lighting is enough
+  // for the photorealistic tiles. Shadows can be re-added with a per-frame
+  // shadow-camera reposition around the anchored model later.
+  sunLight.castShadow = false;
   sunLight.shadow.bias = -0.0001;
   sunLight.shadow.normalBias = 0.04;
   sunLight.visible = !sunParams.isNight;
@@ -615,6 +618,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // ─── Animation loop ─────────────────────────────────────────────────────
   function animate() {
     _animFrame = requestAnimationFrame(animate);
+    // Skip work entirely when the canvas is squished (e.g. the user dragged
+    // DevTools so far up that the viewport collapses) — gl.viewport with a
+    // ~0 dimension floods the WebGL context with errors and breaks rendering.
+    if (canvas.clientWidth < 8 || canvas.clientHeight < 8) return;
     controls.update();
     tiles.setCamera(camera);
     tiles.setResolutionFromRenderer(camera, renderer);
