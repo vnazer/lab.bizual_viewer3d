@@ -387,6 +387,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   scene.add(tiles.group);
   _activeTiles = tiles;
   window.__tiles = tiles;
+  // Expose THREE so you can poke at the scene from the console (the module
+  // import otherwise keeps it scoped to this file).
+  window.THREE = THREE;
 
   // Dynamic attribution — Google's data credits are required by the Maps
   // Platform TOS and change with the tiles in view, so read them from the
@@ -547,25 +550,28 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const north = new THREE.Vector3();
     WGS84_ELLIPSOID.getEastNorthUpAxes(lat * DEG2RAD, lon * DEG2RAD, east, north, new THREE.Vector3());
 
-    // Multi-sample raycast: 9 rays in a 3×3 grid at ±30 m. We keep the LOWEST
-    // valid hit as the ground — a single straight-down ray often lands on a
-    // neighbouring rooftop in dense Maxar tiles, leaving the model hovering.
+    // Multi-sample raycast: 5×5 grid at ±100 m. Dense Maxar tiles in an urban
+    // block mean a tight grid (±30 m) lands every ray on a rooftop — the
+    // "lowest" still ended up 100 m above the street. Widening to ±100 m
+    // covers across the surrounding streets so at least a few rays should hit
+    // asphalt.
     const baseOrigin = latLonToECEF(lat, lon, 15000);
     const ellipsoidR = latLonToECEF(lat, lon, 0).length();
     const dir = _up.clone().negate();
+    const allElevs = [];
     let bestHit = null;
     let bestElev = Infinity;
-    let anyHit = false;
-    for (const dE of [-30, 0, 30]) {
-      for (const dN of [-30, 0, 30]) {
+    const offsets = [-100, -50, 0, 50, 100];
+    for (const dE of offsets) {
+      for (const dN of offsets) {
         const origin = baseOrigin.clone().addScaledVector(east, dE).addScaledVector(north, dN);
         _groundRay.set(origin, dir);
         _groundRay.far = 25000;
         const hits = _groundRay.intersectObject(tiles.group, false);
         if (!hits.length) continue;
-        anyHit = true;
         const elev = hits[0].point.length() - ellipsoidR;
         if (elev < -500 || elev > 9000) continue;
+        allElevs.push(elev);
         if (elev < bestElev) { bestElev = elev; bestHit = hits[0].point.clone(); }
       }
     }
@@ -584,9 +590,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _groundAnchor.clone().addScaledVector(_up, 220),
       _groundAnchor, 1400
     );
-    console.log('[Google 3D] ✅ modelo anclado (lowest de 9 rayos)',
-                '· elev≈' + bestElev.toFixed(1) + 'm sobre elipsoide',
-                '· visibleTiles=' + visible);
+    const sorted = allElevs.slice().sort((a, b) => a - b);
+    console.log('[Google 3D] ✅ modelo anclado',
+                '· suelo (min) ≈ ' + bestElev.toFixed(1) + 'm sobre elipsoide',
+                '· techos (max) ≈ ' + sorted[sorted.length-1].toFixed(1) + 'm',
+                '· hits válidos=' + allElevs.length + '/25',
+                '· spread=' + (sorted[sorted.length-1] - sorted[0]).toFixed(1) + 'm');
     return true;
   }
   let _anchorTries = 0;
