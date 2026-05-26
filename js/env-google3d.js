@@ -612,13 +612,31 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     model.traverse((c) => {
       if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
     });
-    const box = new THREE.Box3().setFromObject(model);
+
+    // Orientation detection. The ENU frame here has local Z = world "up", so
+    // we need the model's vertical axis on Z. For a building, the tallest
+    // bbox dimension is the vertical: if that's Y the GLB is Y-up (glTF
+    // standard) and we rotate +90° around X so +Y maps to +Z; if it's Z, the
+    // model is already Z-up (Blender export) and stays as-is.
+    let box = new THREE.Box3().setFromObject(model);
+    const dims0 = box.getSize(new THREE.Vector3());
+    const orient = (dims0.y >= dims0.x && dims0.y >= dims0.z) ? 'Y-up'
+                 : (dims0.z >= dims0.x && dims0.z >= dims0.y) ? 'Z-up'
+                 : 'X-up';
+    if (orient === 'Y-up') {
+      model.rotateX(Math.PI / 2);
+      box = new THREE.Box3().setFromObject(model);
+    } else if (orient === 'X-up') {
+      model.rotateY(-Math.PI / 2);
+      box = new THREE.Box3().setFromObject(model);
+    }
+
+    const dims = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
-    // The building GLBs are Z-up (Blender export), so their vertical axis is Z.
-    // The frame matrix here has local Z = world "up", so we need the model's
-    // base (box.min.z) at modelRoot origin to sit on the anchor — recentre X/Y
-    // (horizontal) and lift along Z so the base reaches 0.
+    // Recentre horizontals (X/Y) and lift along Z so the base reaches modelRoot
+    // origin (= ground anchor when applyGeoTransform runs).
     model.position.set(-center.x, -center.y, -box.min.z);
+
     modelRoot = new THREE.Group();
     modelRoot.add(model);
     // Hidden until ground anchor finds the real terrain — avoids showing the
@@ -627,10 +645,11 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     scene.add(modelRoot);
     applyGeoTransform();
     window.__g3dModel = { model, box, modelRoot };
-    const _size = box.getSize(new THREE.Vector3());
-    console.log('[Google 3D] modelo cargado · dims (x,y,z) =',
-                _size.x.toFixed(1) + 'm', _size.y.toFixed(1) + 'm', _size.z.toFixed(1) + 'm',
-                '· asume Z-up (mayor extent debería ser Z) · visible=' + modelRoot.visible);
+    console.log('[Google 3D] modelo cargado',
+                '· orient=' + orient + (orient !== 'Z-up' ? ' (rotado a Z-up)' : ''),
+                '· dims original (x,y,z) =', dims0.x.toFixed(1) + 'm', dims0.y.toFixed(1) + 'm', dims0.z.toFixed(1) + 'm',
+                '· altura efectiva=' + dims.z.toFixed(1) + 'm',
+                '· visible=' + modelRoot.visible);
   });
 
   // Sliders
