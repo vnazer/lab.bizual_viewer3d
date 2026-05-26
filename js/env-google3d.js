@@ -300,7 +300,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   // ─── three.js setup ─────────────────────────────────────────────────────
   const canvas = document.getElementById('g3d-canvas');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  const renderer = new THREE.WebGLRenderer({
+    canvas, antialias: true,
+    // Critical at ECEF scale: the camera near/far span ~1 to 1.6e8 m, which
+    // ruins a linear 24-bit depth buffer (sub-metre fights mid-frame). Log
+    // depth keeps every Maxar tile crisp from street level up to orbit.
+    logarithmicDepthBuffer: true,
+  });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.toneMapping = THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.95;
@@ -327,20 +333,31 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   camera.lookAt(latLonToECEF(lat, lon, 0));
 
   const scene = new THREE.Scene();
-  // Soft sky skybox (cielo a horizonte gradient) — less jarring than a flat
-  // blue while tiles stream in. Sphere is bigger than camera.far far enough
-  // to never get clipped.
-  {
-    const skyGeo = new THREE.SphereGeometry(5e6, 32, 16);
-    const skyMat = new THREE.ShaderMaterial({
+  // Sky gradient sphere that follows the camera so it works as an actual sky
+  // dome at any scale. The gradient uses the local up direction (ellipsoid
+  // normal) so "top" is always overhead regardless of where on Earth we are.
+  const skySphere = (() => {
+    const geo = new THREE.SphereGeometry(2000, 32, 16);
+    const mat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
-      uniforms: { topColor: { value: new THREE.Color(0x4d8fcf) }, bottomColor: { value: new THREE.Color(0xeaf4fb) } },
-      vertexShader: `varying vec3 vWorld; void main(){ vWorld = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-      fragmentShader: `varying vec3 vWorld; uniform vec3 topColor; uniform vec3 bottomColor; void main(){ float h = clamp(normalize(vWorld).z, -1.0, 1.0); vec3 c = mix(bottomColor, topColor, smoothstep(-0.1, 0.6, h)); gl_FragColor = vec4(c, 1.0); }`,
+      depthWrite: false,
+      uniforms: {
+        topColor:    { value: new THREE.Color(0x4d8fcf) },
+        bottomColor: { value: new THREE.Color(0xeaf4fb) },
+        upDir:       { value: new THREE.Vector3(0, 0, 1) },
+      },
+      vertexShader: `varying vec3 vLocal;
+        void main(){ vLocal = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `varying vec3 vLocal; uniform vec3 topColor; uniform vec3 bottomColor; uniform vec3 upDir;
+        void main(){ float h = clamp(dot(normalize(vLocal), upDir), -1.0, 1.0);
+          gl_FragColor = vec4(mix(bottomColor, topColor, smoothstep(-0.1, 0.6, h)), 1.0); }`,
     });
-    scene.add(new THREE.Mesh(skyGeo, skyMat));
-    scene.background = null;
-  }
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = -1;
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    return mesh;
+  })();
 
   // ─── Google 3D Tiles ────────────────────────────────────────────────────
   // IMPORTANT: do NOT pass URL to the constructor. The official pattern uses
@@ -520,10 +537,20 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   function tryAnchorGround() {
     if (_groundAnchor) return true;
     const visible = tiles.visibleTiles?.size || 0;
-    if (!tiles.group || visible === 0) return false;
+    // Wait for the tileset to refine past the coarse global basemap (~1-6
+    // tiles); otherwise the raycast hits the ellipsoid-level mesh and the
+    // anchor lands ~600 m below Macul's real ground.
+    if (!tiles.group || visible < 10) return false;
     _groundRay.set(latLonToECEF(lat, lon, 6000), _up.clone().negate());
     const hits = _groundRay.intersectObject(tiles.group, false);
     if (!hits.length) return false;
+    // Elevation above the ellipsoid at the hit point. If it's near 0 the
+    // raycast pierced the basemap, not the Maxar terrain — keep retrying.
+    const elev = hits[0].point.length() - latLonToECEF(lat, lon, 0).length();
+    if (Math.abs(elev) < 5) {
+      console.log('[Google 3D] raycast pegó al basemap (elev≈' + elev.toFixed(1) + 'm); esperando Maxar…');
+      return false;
+    }
     _groundAnchor = hits[0].point.clone();
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
@@ -533,7 +560,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _groundAnchor.clone().addScaledVector(_up, 220),
       _groundAnchor, 1400
     );
-    console.log('[Google 3D] ✅ modelo anclado al terreno real (raycast hit, visibleTiles=' + visible + ')');
+    console.log('[Google 3D] ✅ modelo anclado al terreno real',
+                '· elev≈' + elev.toFixed(1) + 'm sobre elipsoide',
+                '· visibleTiles=' + visible);
     return true;
   }
   let _anchorTries = 0;
@@ -627,6 +656,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     tiles.setResolutionFromRenderer(camera, renderer);
     tiles.update();
     camera.up.copy(camera.position).normalize();
+    // Sky dome follows the camera so it's an actual surrounding sky at any
+    // distance from the globe; gradient stays aligned to local up.
+    skySphere.position.copy(camera.position);
+    skySphere.material.uniforms.upDir.value.copy(camera.up);
     renderer.render(scene, camera);
   }
   animate();
