@@ -318,7 +318,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const { W, H } = fitSize();
 
   const camera = new THREE.PerspectiveCamera(60, W / H, 1, 160_000_000);
-  const initPos = latLonToECEF(lat, lon, 3000);
+  // Start close to the surface so screen-space error is high enough that the
+  // tiles renderer refines past the global basemap into Maxar 3D tiles.
+  // The ground anchor below re-frames the camera once it finds real terrain.
+  const initPos = latLonToECEF(lat, lon, 800);
   camera.position.copy(initPos);
   camera.up.copy(initPos.clone().normalize());
   camera.lookAt(latLonToECEF(lat, lon, 0));
@@ -513,24 +516,36 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   _groundRay.firstHitOnly = true;
   function tryAnchorGround() {
     if (_groundAnchor) return true;
-    if (!tiles.group || tiles.visibleTiles?.size === 0) return false;
+    const visible = tiles.visibleTiles?.size || 0;
+    if (!tiles.group || visible === 0) return false;
     _groundRay.set(latLonToECEF(lat, lon, 6000), _up.clone().negate());
     const hits = _groundRay.intersectObject(tiles.group, false);
     if (!hits.length) return false;
     _groundAnchor = hits[0].point.clone();
     applyGeoTransform();
+    if (modelRoot) modelRoot.visible = true;
     controls.target.copy(_groundAnchor);
     animateCameraTo(
       camera, controls,
       _groundAnchor.clone().addScaledVector(_up, 220),
       _groundAnchor, 1400
     );
-    console.log('[Google 3D] ✅ modelo anclado al terreno real (raycast hit)');
+    console.log('[Google 3D] ✅ modelo anclado al terreno real (raycast hit, visibleTiles=' + visible + ')');
     return true;
   }
   let _anchorTries = 0;
   const _anchorInterval = setInterval(() => {
-    if (tryAnchorGround() || ++_anchorTries > 45) clearInterval(_anchorInterval);
+    if (tryAnchorGround()) { clearInterval(_anchorInterval); return; }
+    _anchorTries++;
+    if (_anchorTries % 6 === 0) {
+      console.log('[Google 3D] raycast aún sin suelo · visibleTiles=' + (tiles.visibleTiles?.size || 0) +
+                  ' · intentos=' + _anchorTries);
+    }
+    if (_anchorTries > 45) {
+      clearInterval(_anchorInterval);
+      console.warn('[Google 3D] ⚠️ no se pudo anclar al terreno tras 30s — muestro el modelo en el elipsoide (puede flotar). Bajá 🎯 Calidad para forzar más detalle.');
+      if (modelRoot) modelRoot.visible = true;
+    }
   }, 700);
   tiles._anchorInterval = _anchorInterval;
 
@@ -546,10 +561,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     model.position.set(-center.x, -box.min.y, -center.z);
     modelRoot = new THREE.Group();
     modelRoot.add(model);
+    // Hidden until ground anchor finds the real terrain — avoids showing the
+    // model floating at the ellipsoid surface during the first 1-2s.
+    modelRoot.visible = !!_groundAnchor;
     scene.add(modelRoot);
     applyGeoTransform();
     window.__g3dModel = { model, box, modelRoot };
-    console.log('[Google 3D] modelo cargado, dimensiones:', box.getSize(new THREE.Vector3()));
+    console.log('[Google 3D] modelo cargado, dimensiones:', box.getSize(new THREE.Vector3()),
+                '· visible=' + modelRoot.visible + ' (esperando anchor del terreno)');
   });
 
   // Sliders
