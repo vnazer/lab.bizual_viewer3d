@@ -558,7 +558,11 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     });
     const box = new THREE.Box3().setFromObject(model);
     const center = box.getCenter(new THREE.Vector3());
-    model.position.set(-center.x, -box.min.y, -center.z);
+    // The building GLBs are Z-up (Blender export), so their vertical axis is Z.
+    // The frame matrix here has local Z = world "up", so we need the model's
+    // base (box.min.z) at modelRoot origin to sit on the anchor — recentre X/Y
+    // (horizontal) and lift along Z so the base reaches 0.
+    model.position.set(-center.x, -center.y, -box.min.z);
     modelRoot = new THREE.Group();
     modelRoot.add(model);
     // Hidden until ground anchor finds the real terrain — avoids showing the
@@ -567,8 +571,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     scene.add(modelRoot);
     applyGeoTransform();
     window.__g3dModel = { model, box, modelRoot };
-    console.log('[Google 3D] modelo cargado, dimensiones:', box.getSize(new THREE.Vector3()),
-                '· visible=' + modelRoot.visible + ' (esperando anchor del terreno)');
+    const _size = box.getSize(new THREE.Vector3());
+    console.log('[Google 3D] modelo cargado · dims (x,y,z) =',
+                _size.x.toFixed(1) + 'm', _size.y.toFixed(1) + 'm', _size.z.toFixed(1) + 'm',
+                '· asume Z-up (mayor extent debería ser Z) · visible=' + modelRoot.visible);
   });
 
   // Sliders
