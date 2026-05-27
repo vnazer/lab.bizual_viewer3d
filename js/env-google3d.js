@@ -291,7 +291,23 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sE = parseFloat(localStorage.getItem('bizual_g3d_offset_east')  || 0);
   const sN = parseFloat(localStorage.getItem('bizual_g3d_offset_north') || 0);
   const sS = parseFloat(localStorage.getItem('bizual_g3d_scale') || 1);
-  const sQ = parseFloat(localStorage.getItem('bizual_g3d_quality') || 10);
+  // bizual_g3d_calidad: 1-10 scale where 10 = maximum detail. The old
+  // bizual_g3d_quality key stored the raw errorTarget (inverted semantics:
+  // lower = more detail), which confused the slider direction. We migrate
+  // the old value to calidad if present.
+  const sQ = (() => {
+    const v2 = localStorage.getItem('bizual_g3d_calidad');
+    if (v2 != null) return Math.max(1, Math.min(10, parseFloat(v2)));
+    const oldErrorTarget = parseFloat(localStorage.getItem('bizual_g3d_quality') || 0);
+    if (oldErrorTarget > 0) return Math.max(1, Math.min(10, Math.round((25 - oldErrorTarget) / 2.4)));
+    return 8; // default: high-but-not-max
+  })();
+
+  // Calidad slider (1-10) ↔ errorTarget (~22 to 1). Lower errorTarget loads
+  // finer tiles, so calidad=10 → errorTarget=1 (sharpest), calidad=1 →
+  // errorTarget=22 (lightest). Keep errorTarget bounded ≥1 to avoid the
+  // renderer thrashing on impossible targets.
+  const calidadToErrorTarget = (c) => Math.max(1, Math.round(25 - c * 2.4));
 
   // Format helpers for slider display text.
   const fmtEW = (v) => Math.abs(v).toFixed(1) + ' m ' + (v >= 0 ? 'E' : 'O');
@@ -344,15 +360,15 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           <input type="range" id="g3d-scale" min="0.1" max="3"   step="0.05" value="${sS}">
           <span id="g3d-scale-val">${sS}×</span>
         </label>
-        <label title="errorTarget: menor = más detalle (más pesado), mayor = más liviano. Usá los botones 📸/⚡ para presets.">🎯 Calidad
-          <input type="range" id="g3d-quality" min="2" max="24" step="1" value="${sQ}">
-          <span id="g3d-quality-val">${sQ}</span>
+        <label title="Calidad de los tiles de Maxar. 10 = máximo detalle (carga más pesado). 1 = más liviano. Usá los botones 📸/⚡ para presets.">🎯 Calidad
+          <input type="range" id="g3d-quality" min="1" max="10" step="1" value="${sQ}">
+          <span id="g3d-quality-val">${sQ}/10</span>
         </label>
       </div>
       <div class="g3d-quality">
         <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
         <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
-        <button id="g3d-view-sv" title="Street View real de Google en estas coordenadas. El modelo 3D no aparece encima (es una vista alternativa para ver el lugar real).">🌆 Street View</button>
+        <button id="g3d-view-sv" title="Abre Street View real de Google en una pestaña nueva, centrado en estas coordenadas. El modelo 3D no aparece encima (es una vista alternativa para ver el lugar real con fotos).">🌆 Street View</button>
         <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
         <button id="g3d-quality-photo" title="Sube la calidad de tiles al máximo (errorTarget=4) para que se vean ultra-nítidos. Tarda más en cargar pero ideal antes de capturar.">📸 Calidad</button>
         <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido.">⚡ Rápido</button>
@@ -370,17 +386,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const k = (prompt('Google Maps API key:', getGoogleApiKey()) || '').trim();
     if (k) { saveGoogleApiKey(k); closeGoogle3DPanel(); openGoogle3DPanel(coords, modelUrl); }
   });
-  const escHandler = (e) => {
-    if (e.key !== 'Escape') return;
-    // If the Street View overlay is open, Esc closes it first instead of
-    // dismissing the whole panel.
-    const sv = document.getElementById('g3d-sv-overlay');
-    if (sv && sv.style.display === 'block') {
-      document.getElementById('g3d-sv-close')?.click();
-      return;
-    }
-    closeGoogle3DPanel();
-  };
+  const escHandler = (e) => { if (e.key === 'Escape') closeGoogle3DPanel(); };
   document.addEventListener('keydown', escHandler);
   panel._escHandler = escHandler;
 
@@ -465,7 +471,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // Quality / network budget. errorTarget drives screen-space error: lower =
   // more detail (heavier), higher = lighter. Cache + queue sizes are bounded so
   // a long session doesn't saturate memory or the network.
-  tiles.errorTarget = sQ;
+  tiles.errorTarget = calidadToErrorTarget(sQ);
   // Larger cache + more parallel jobs so the user can orbit close to the
   // model without Maxar tiles being evicted/re-downloaded every move.
   tiles.lruCache.minSize = 1000;
@@ -905,25 +911,27 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   bindSlider('g3d-north', 'g3d-north-val', 1, ' m', (v) => offsetN = v, fmtNS);
   bindSlider('g3d-scale', 'g3d-scale-val', 2, '×',  (v) => scaleMx = v);
 
-  let qualityVal = sQ;
+  let qualityVal = sQ; // 1-10, where 10 = max detail
   const qInp = document.getElementById('g3d-quality');
   const qOut = document.getElementById('g3d-quality-val');
-  function setQuality(v) {
-    qualityVal = v;
-    qInp.value = String(v);
-    qOut.textContent = String(v);
-    tiles.errorTarget = v;
+  // Apply initial errorTarget from saved calidad (sQ).
+  tiles.errorTarget = calidadToErrorTarget(sQ);
+  function setQuality(calidad) {
+    qualityVal = Math.max(1, Math.min(10, calidad));
+    qInp.value = String(qualityVal);
+    qOut.textContent = qualityVal + '/10';
+    tiles.errorTarget = calidadToErrorTarget(qualityVal);
   }
   qInp.addEventListener('input', (e) => setQuality(parseFloat(e.target.value)));
-  // Preset buttons. Photo = max detail (slower, sharper tiles at street
-  // level — best for screenshots). Fast = balanced for everyday inspection.
+  // Preset buttons. Photo = max detail (slowest load, sharpest tiles at
+  // street level — use before 📷 Capturar). Fast = light for everyday nav.
   document.getElementById('g3d-quality-photo').addEventListener('click', () => {
-    setQuality(4);
-    console.log('[Google 3D] preset 📸 Foto: errorTarget=4');
+    setQuality(10);
+    console.log('[Google 3D] preset 📸 Calidad máxima: calidad=10 · errorTarget=' + calidadToErrorTarget(10));
   });
   document.getElementById('g3d-quality-fast').addEventListener('click', () => {
-    setQuality(14);
-    console.log('[Google 3D] preset ⚡ Rápido: errorTarget=14');
+    setQuality(4);
+    console.log('[Google 3D] preset ⚡ Rápido: calidad=4 · errorTarget=' + calidadToErrorTarget(4));
   });
 
   document.getElementById('g3d-save').addEventListener('click', () => {
@@ -934,7 +942,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     localStorage.setItem('bizual_g3d_offset_east',   String(offsetE));
     localStorage.setItem('bizual_g3d_offset_north',  String(offsetN));
     localStorage.setItem('bizual_g3d_scale',         String(scaleMx));
-    localStorage.setItem('bizual_g3d_quality',       String(qualityVal));
+    localStorage.setItem('bizual_g3d_calidad',       String(qualityVal));
     const btn = document.getElementById('g3d-save');
     btn.textContent = '✅ Guardado';
     setTimeout(() => { btn.textContent = '💾 Guardar ajustes'; }, 1500);
@@ -973,28 +981,19 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     animateCameraTo(camera, controls, eyePos, lookAt, 1200);
   });
 
-  // Street View overlay. Embeds Google's panoramic photographic Street View
-  // at the model's lat/lon via the Maps Embed API (different from Map Tiles,
-  // needs "Maps Embed API" enabled on the key). The 3D model is hidden while
-  // the overlay is up — overlaying the model on top of Street View requires
-  // syncing two cameras (Three.js + StreetViewPanorama) and is a separate
-  // project. For now the user can toggle between views.
+  // Street View — open in a new browser tab using Google's official public
+  // URL (api=1&map_action=pano). This doesn't need any API key or referer
+  // setup and always finds the nearest available panorama. The previous
+  // iframe-embed approach (Maps Embed API) was unreliable: black screen
+  // when restrictions blocked it or no panorama exists at the exact spot.
+  // Hiding the unused overlay so it doesn't sit behind the canvas.
   const svOverlay = document.getElementById('g3d-sv-overlay');
-  const svIframe  = document.getElementById('g3d-sv-iframe');
-  function openStreetView() {
-    const url = 'https://www.google.com/maps/embed/v1/streetview'
-      + '?key=' + encodeURIComponent(apiKey)
-      + '&location=' + lat + ',' + lon
-      + '&heading=0&pitch=0&fov=90';
-    svIframe.src = url;
-    svOverlay.style.display = 'block';
-  }
-  function closeStreetView() {
-    svOverlay.style.display = 'none';
-    svIframe.src = 'about:blank';
-  }
-  document.getElementById('g3d-view-sv').addEventListener('click', openStreetView);
-  document.getElementById('g3d-sv-close').addEventListener('click', closeStreetView);
+  if (svOverlay) svOverlay.style.display = 'none';
+  document.getElementById('g3d-view-sv').addEventListener('click', () => {
+    const url = 'https://www.google.com/maps/@?api=1&map_action=pano'
+      + '&viewpoint=' + lat + ',' + lon;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  });
 
   // Screenshot of the current 3D view. Saves a PNG with the lat/lon and
   // timestamp in the filename so multiple captures don't overwrite.
