@@ -456,9 +456,6 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     preserveDrawingBuffer: true,
   });
   renderer.setPixelRatio(window.devicePixelRatio);
-  // Cache max anisotropy once; used per-tile below to sharpen textures at
-  // oblique angles (street level, façade close-ups).
-  const _maxAniso = renderer.capabilities.getMaxAnisotropy();
   renderer.toneMapping = THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.95;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -579,27 +576,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     if (/401/.test(status)) console.error('[Google 3D] → 401: API key inválida');
     if (/429/.test(status)) console.error('[Google 3D] → 429: rate limit / cuota excedida');
   });
-  tiles.addEventListener('load-content', (e) => {
-    // Boost anisotropic filtering on each Maxar tile texture for sharper
-    // sampling at oblique angles. Important: only touch the texture after
-    // its image has actually loaded, and DON'T flip needsUpdate — forcing
-    // a re-upload of every tile texture caused some tiles to render as
-    // un-textured wireframe meshes ("fishnet" on the ground). Anisotropy
-    // is a sampler param that three.js picks up on next bind without
-    // needing a full re-upload of the pixel data.
-    const tileScene = e?.scene || e?.tile?.cached?.scene;
-    if (!tileScene || !tileScene.traverse) return;
-    tileScene.traverse((obj) => {
-      if (!obj.isMesh || !obj.material) return;
-      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-      for (const m of mats) {
-        const t = m.map;
-        if (!t) continue;
-        if (!t.image || !t.image.width) continue; // image not ready yet
-        if (t.anisotropy < _maxAniso) t.anisotropy = _maxAniso;
-      }
-    });
-  });
+  // (Removed: per-tile anisotropy mutation. It was introduced in 89ae45e to
+  // sharpen oblique-angle sampling but turned out to interact badly with
+  // Three.js's texture binding cache for Maxar tiles, causing some tiles
+  // to render without textures ("fishnet" on the ground). Default
+  // anisotropy=1 is good enough and matches the v=20260604 behaviour the
+  // user wants to restore.)
 
   // Periodic stats — uses the actual property names from 0.4.7.
   const _statsInterval = setInterval(() => {
@@ -780,19 +762,15 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return { hit: bestHit, elev: bestElev, max: elevs[elevs.length - 1], count: elevs.length, rejected: rejectedFar };
   }
 
-  // Move the orbit target to the model and tween the camera close so the
-  // tiles renderer is forced to refine Maxar tiles near the building.
-  // Without this, the initial 800 m-above-ellipsoid camera position
-  // produces the "flat tan terrain" view where the renderer is happy with
-  // coarse global tiles because the model is far from the camera.
+  // Just centre the orbit on the anchor. DO NOT tween the camera — that
+  // regression (94e62a1) moved the camera to anchor + 60 m east + 40 m up
+  // which, when the anchor was non-deterministic raycast that landed wrong,
+  // dragged the camera to a place where Maxar tiles never refine. Behaviour
+  // restored to v=20260604: camera stays at its initial 800 m-altitude pose
+  // and the user picks 🚶 Calle / 🛩 Aérea / scroll-zoom to navigate.
   function frameOnAnchor() {
     if (!_groundAnchor) return;
-    const lookAt  = _groundAnchor.clone().addScaledVector(_up, 15);
-    const eyePos  = _groundAnchor.clone()
-      .addScaledVector(_east, 60)
-      .addScaledVector(_up,   40);
-    controls.target.copy(lookAt);
-    animateCameraTo(camera, controls, eyePos, lookAt, 1400);
+    controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
   }
 
   function tryAnchorGround() {
