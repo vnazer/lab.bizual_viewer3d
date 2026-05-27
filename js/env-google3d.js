@@ -540,76 +540,117 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // the camera on it. Retries until tiles under the target exist.
   const _groundRay = new THREE.Raycaster();
   _groundRay.firstHitOnly = true;
-  function tryAnchorGround() {
-    if (_groundAnchor) return true;
-    const visible = tiles.visibleTiles?.size || 0;
-    if (!tiles.group || visible < 10) return false;
+  // East/north axes once — they don't change during the session.
+  const _east  = new THREE.Vector3();
+  const _north = new THREE.Vector3();
+  WGS84_ELLIPSOID.getEastNorthUpAxes(lat * DEG2RAD, lon * DEG2RAD, _east, _north, new THREE.Vector3());
 
-    // East/north axes around the target so we can fan rays in a small grid.
-    const east  = new THREE.Vector3();
-    const north = new THREE.Vector3();
-    WGS84_ELLIPSOID.getEastNorthUpAxes(lat * DEG2RAD, lon * DEG2RAD, east, north, new THREE.Vector3());
-
-    // Multi-sample raycast: 5×5 grid at ±100 m. Dense Maxar tiles in an urban
-    // block mean a tight grid (±30 m) lands every ray on a rooftop — the
-    // "lowest" still ended up 100 m above the street. Widening to ±100 m
-    // covers across the surrounding streets so at least a few rays should hit
-    // asphalt.
+  // Multi-sample raycast helper: 5×5 grid at ±100 m, returns the LOWEST valid
+  // hit (= street level, not rooftops) plus stats on the spread. Shared
+  // between the initial anchor and the refinement pass that runs as Maxar
+  // tiles arrive at higher LOD.
+  function sampleGround() {
     const baseOrigin = latLonToECEF(lat, lon, 15000);
     const ellipsoidR = latLonToECEF(lat, lon, 0).length();
     const dir = _up.clone().negate();
-    const allElevs = [];
+    const elevs = [];
     let bestHit = null;
     let bestElev = Infinity;
-    const offsets = [-100, -50, 0, 50, 100];
-    for (const dE of offsets) {
-      for (const dN of offsets) {
-        const origin = baseOrigin.clone().addScaledVector(east, dE).addScaledVector(north, dN);
+    for (const dE of [-100, -50, 0, 50, 100]) {
+      for (const dN of [-100, -50, 0, 50, 100]) {
+        const origin = baseOrigin.clone().addScaledVector(_east, dE).addScaledVector(_north, dN);
         _groundRay.set(origin, dir);
         _groundRay.far = 25000;
         const hits = _groundRay.intersectObject(tiles.group, false);
         if (!hits.length) continue;
         const elev = hits[0].point.length() - ellipsoidR;
         if (elev < -500 || elev > 9000) continue;
-        allElevs.push(elev);
+        elevs.push(elev);
         if (elev < bestElev) { bestElev = elev; bestHit = hits[0].point.clone(); }
       }
     }
-    if (!bestHit) return false;
-    if (Math.abs(bestElev) < 5) {
-      console.log('[Google 3D] raycast pegó al basemap (elev≈' + bestElev.toFixed(1) + 'm); esperando Maxar…');
+    if (!bestHit) return null;
+    elevs.sort((a, b) => a - b);
+    return { hit: bestHit, elev: bestElev, max: elevs[elevs.length - 1], count: elevs.length };
+  }
+
+  function tryAnchorGround() {
+    if (_groundAnchor) return true;
+    if (!tiles.group || (tiles.visibleTiles?.size || 0) < 10) return false;
+    const r = sampleGround();
+    if (!r) return false;
+    if (Math.abs(r.elev) < 5) {
+      console.log('[Google 3D] raycast pegó al basemap (elev≈' + r.elev.toFixed(1) + 'm); esperando Maxar…');
       return false;
     }
-
-    _groundAnchor = bestHit;
+    _groundAnchor = r.hit;
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
-    controls.target.copy(_groundAnchor);
+    // Oblique pedestrian-scale framing: ~150 m east + 80 m up, looking at the
+    // building's mid-height. Much better than the previous top-down 220 m
+    // view which made the model look tiny against far terrain.
+    const lookAt = _groundAnchor.clone().addScaledVector(_up, 15);
+    controls.target.copy(lookAt);
     animateCameraTo(
       camera, controls,
-      _groundAnchor.clone().addScaledVector(_up, 220),
-      _groundAnchor, 1400
+      _groundAnchor.clone().addScaledVector(_east, 150).addScaledVector(_up, 80),
+      lookAt, 1400
     );
-    const sorted = allElevs.slice().sort((a, b) => a - b);
     console.log('[Google 3D] ✅ modelo anclado',
-                '· suelo (min) ≈ ' + bestElev.toFixed(1) + 'm sobre elipsoide',
-                '· techos (max) ≈ ' + sorted[sorted.length-1].toFixed(1) + 'm',
-                '· hits válidos=' + allElevs.length + '/25',
-                '· spread=' + (sorted[sorted.length-1] - sorted[0]).toFixed(1) + 'm');
+                '· suelo (min) ≈ ' + r.elev.toFixed(1) + 'm sobre elipsoide',
+                '· techos (max) ≈ ' + r.max.toFixed(1) + 'm',
+                '· hits válidos=' + r.count + '/25',
+                '· spread=' + (r.max - r.elev).toFixed(1) + 'm');
     return true;
   }
+
+  // Refinement pass: once anchored, keep re-sampling for the next ~30 s. If
+  // Maxar HD tiles land where the initial raycast only saw the coarse global
+  // basemap (spread ≈ 0.5 m → real Maxar with buildings → spread 10-30 m),
+  // re-anchor to the new lowest hit so the model isn't permanently stuck at
+  // the basemap's smoothed elevation. Camera + controls.target pan with the
+  // delta so framing stays consistent without a jarring re-tween.
+  function refineAnchorGround() {
+    if (!_groundAnchor) return false;
+    const r = sampleGround();
+    if (!r || Math.abs(r.elev) < 5) return false;
+    const ellipsoidR = latLonToECEF(lat, lon, 0).length();
+    const currentElev = _groundAnchor.length() - ellipsoidR;
+    const delta = r.elev - currentElev;
+    // Only refine when the new lowest hit is meaningfully higher (Maxar
+    // refining above the basemap). Ignore tiny jitter and downward jumps.
+    if (delta < 1 || delta > 200) return false;
+    const shift = r.hit.clone().sub(_groundAnchor);
+    _groundAnchor = r.hit;
+    applyGeoTransform();
+    camera.position.add(shift);
+    controls.target.add(shift);
+    console.log('[Google 3D] anchor refinado: ' + currentElev.toFixed(1) + 'm → ' + r.elev.toFixed(1) +
+                'm (Δ=+' + delta.toFixed(1) + 'm) · spread=' + (r.max - r.elev).toFixed(1) + 'm');
+    return true;
+  }
+
   let _anchorTries = 0;
+  let _refineTicks = 0;
   const _anchorInterval = setInterval(() => {
-    if (tryAnchorGround()) { clearInterval(_anchorInterval); return; }
-    _anchorTries++;
-    if (_anchorTries % 6 === 0) {
-      console.log('[Google 3D] raycast aún sin suelo · visibleTiles=' + (tiles.visibleTiles?.size || 0) +
-                  ' · intentos=' + _anchorTries);
+    if (!_groundAnchor) {
+      if (tryAnchorGround()) return; // initial success — stay on, start refining
+      _anchorTries++;
+      if (_anchorTries % 6 === 0) {
+        console.log('[Google 3D] raycast aún sin suelo · visibleTiles=' + (tiles.visibleTiles?.size || 0) +
+                    ' · intentos=' + _anchorTries);
+      }
+      if (_anchorTries > 45) {
+        clearInterval(_anchorInterval);
+        console.warn('[Google 3D] ⚠️ no se pudo anclar al terreno tras 30s — muestro el modelo en el elipsoide. Bajá 🎯 Calidad para forzar más detalle.');
+        if (modelRoot) modelRoot.visible = true;
+      }
+      return;
     }
-    if (_anchorTries > 45) {
+    refineAnchorGround();
+    if (++_refineTicks >= 45) { // ~30 s of refinement after initial anchor
       clearInterval(_anchorInterval);
-      console.warn('[Google 3D] ⚠️ no se pudo anclar al terreno tras 30s — muestro el modelo en el elipsoide (puede flotar). Bajá 🎯 Calidad para forzar más detalle.');
-      if (modelRoot) modelRoot.visible = true;
+      console.log('[Google 3D] refinamiento del anchor concluido');
     }
   }, 700);
   tiles._anchorInterval = _anchorInterval;
@@ -619,7 +660,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   loader.load(modelUrl, (gltf) => {
     const model = gltf.scene;
     model.traverse((c) => {
-      if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
+      if (c.isMesh) {
+        c.castShadow = true;
+        c.receiveShadow = true;
+        // Defensive: force standard depth behaviour so the model can't render
+        // on top of Maxar tiles that are in front of it (some glTF exporters
+        // leave materials with depthTest=false or transparent=true).
+        if (c.material) {
+          const mats = Array.isArray(c.material) ? c.material : [c.material];
+          for (const m of mats) {
+            m.depthTest = true;
+            m.depthWrite = true;
+          }
+        }
+        c.renderOrder = 0;
+      }
     });
 
     // ── 1) Orientation detection: for a building the tallest bbox extent is
