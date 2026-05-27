@@ -185,31 +185,56 @@ async function preflightKey(apiKey) {
   }
 }
 
-// Ground elevation lookup via the Google Elevation API. Returns metres above
-// sea level for the (lat, lon) point, or null if the API isn't available
-// (key not enabled, network error, etc.). Used as the primary anchor source
-// so model placement is deterministic — no more dependence on which tiles
-// happened to be loaded when the raycast fired.
+// Module-level loader for the Maps JS library. Several functions need
+// google.maps.* without depending on the panel having opened first — make
+// it reusable and idempotent.
+let _gmapsJSPromise = null;
+function ensureGoogleMapsJSLoaded(apiKey) {
+  if (window.google?.maps?.ElevationService) return Promise.resolve();
+  if (_gmapsJSPromise) return _gmapsJSPromise;
+  _gmapsJSPromise = new Promise((resolve, reject) => {
+    const cb = '__g3dGmapsReady_' + Math.random().toString(36).slice(2);
+    window[cb] = () => { delete window[cb]; resolve(); };
+    const s = document.createElement('script');
+    s.async = true;
+    s.src = 'https://maps.googleapis.com/maps/api/js'
+      + '?key=' + encodeURIComponent(apiKey)
+      + '&callback=' + cb;
+    s.onerror = () => { _gmapsJSPromise = null; reject(new Error('No se pudo cargar Maps JS')); };
+    document.head.appendChild(s);
+  });
+  return _gmapsJSPromise;
+}
+
+// Ground elevation lookup via the Maps JS ElevationService (NOT a direct
+// fetch to the REST endpoint — that one has no CORS headers so browser
+// requests are blocked). Returns metres above sea level for the (lat, lon)
+// point, or null if the service can't answer.
 async function fetchGroundElevation(lat, lon, apiKey) {
-  const url = 'https://maps.googleapis.com/maps/api/elevation/json'
-    + '?locations=' + lat + ',' + lon
-    + '&key=' + encodeURIComponent(apiKey);
   try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.warn('[Google 3D] Elevation API HTTP ' + res.status + ' — fallback al raycast');
-      return null;
-    }
-    const data = await res.json();
-    if (data.status !== 'OK' || !data.results?.[0]) {
-      console.warn('[Google 3D] Elevation API: ' + data.status + (data.error_message ? ' · ' + data.error_message : '') + ' — fallback al raycast');
-      return null;
-    }
-    return data.results[0].elevation;
+    await ensureGoogleMapsJSLoaded(apiKey);
   } catch (e) {
-    console.warn('[Google 3D] Elevation API fetch falló:', e.message);
+    console.warn('[Google 3D] Maps JS no se cargó — Elevation no disponible:', e.message);
     return null;
   }
+  if (!window.google?.maps?.ElevationService) {
+    console.warn('[Google 3D] google.maps.ElevationService no existe — ¿"Maps JavaScript API" habilitada?');
+    return null;
+  }
+  return new Promise((resolve) => {
+    const elevator = new google.maps.ElevationService();
+    elevator.getElevationForLocations(
+      { locations: [{ lat: lat, lng: lon }] },
+      (results, status) => {
+        if (status !== 'OK' || !results || !results[0]) {
+          console.warn('[Google 3D] ElevationService status=' + status + ' — fallback al raycast');
+          resolve(null);
+          return;
+        }
+        resolve(results[0].elevation);
+      }
+    );
+  });
 }
 
 function showPreflightError(detail) {
@@ -1036,20 +1061,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // planned building stands in that environment.
   let _svPanorama = null, _svRenderer = null, _svScene = null, _svCamera = null;
   let _svAnimFrame = null, _svModelRoot = null;
-  function ensureGoogleMapsJS() {
-    if (window.google?.maps?.StreetViewPanorama) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const cb = '__g3dGmapsReady_' + Math.random().toString(36).slice(2);
-      window[cb] = () => { delete window[cb]; resolve(); };
-      const s = document.createElement('script');
-      s.async = true;
-      s.src = 'https://maps.googleapis.com/maps/api/js'
-        + '?key=' + encodeURIComponent(apiKey)
-        + '&callback=' + cb;
-      s.onerror = () => reject(new Error('No se pudo cargar Maps JS (¿"Maps JavaScript API" habilitada?)'));
-      document.head.appendChild(s);
-    });
-  }
+  // Local alias for the module-level Maps JS loader so existing call sites
+  // don't need apiKey passed through.
+  const ensureGoogleMapsJS = () => ensureGoogleMapsJSLoaded(apiKey);
   async function openStreetViewOverlay() {
     if (!modelRoot) { alert('Esperá a que termine de cargar el modelo.'); return; }
     const overlay  = document.getElementById('g3d-svfull');

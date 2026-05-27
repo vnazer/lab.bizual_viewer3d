@@ -2395,7 +2395,7 @@ $('btn-show-g3d')?.addEventListener('click', async () => {
       const mb = await import('./mapbox-env.js?v=20260519');
       coords = await mb.geocodeAddress(addr);
     }
-    const g3d = await import('./env-google3d.js?v=20260613');
+    const g3d = await import('./env-google3d.js?v=20260614');
     _envHandleG3d = await g3d.openGoogle3DPanel(coords, _modelForEnv());
   } catch (err) {
     console.error('[g3d] open failed:', err);
