@@ -109,6 +109,7 @@ export function closeGoogle3DPanel() {
   if (_activeTiles) {
     if (_activeTiles._statsInterval) clearInterval(_activeTiles._statsInterval);
     if (_activeTiles._anchorInterval) clearInterval(_activeTiles._anchorInterval);
+    if (_activeTiles._anchorWatch) clearInterval(_activeTiles._anchorWatch);
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
     try { _activeTiles.dispose(); } catch {}
     _activeTiles = null;
@@ -382,6 +383,18 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
         <button id="g3d-save">💾 Guardar ajustes</button>
       </div>
+    </div>
+    <div id="g3d-anchorbadge" title="Origen y valor del anchor de altura del modelo. Verde = Elevation API determinística. Naranja = raycast no-determinístico (puede flotar)."
+         style="position:absolute;top:54px;right:8px;z-index:40;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.25);border-radius:4px;padding:6px 10px;font-size:12px;font-family:ui-monospace,monospace;display:flex;gap:8px;align-items:center;">
+      <span id="g3d-anchor-status">Anchor: ⏳ buscando…</span>
+      <button id="g3d-reanchor" title="Re-intentar el anchor (vuelve a llamar a la API y al raycast)"
+              style="background:rgba(80,160,240,0.35);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;">🎯 Re-anclar</button>
+      <span style="opacity:0.6">·</span>
+      <span>Forzar elev (m):</span>
+      <input type="number" id="g3d-elev-override" step="1" min="-500" max="9000" placeholder="auto"
+             style="width:64px;background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:2px 4px;font-size:11px;font-family:ui-monospace,monospace;">
+      <button id="g3d-elev-apply" title="Plantar el modelo a esa elevación exacta (anula API y raycast)"
+              style="background:rgba(120,200,120,0.35);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;">Aplicar</button>
     </div>
     <div class="g3d-attribution">© Google · Imagery ©2025 Maxar Technologies</div>
   `;
@@ -1134,6 +1147,77 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const url = 'https://www.google.com/maps/@?api=1&map_action=pano'
       + '&viewpoint=' + lat + ',' + lon;
     window.open(url, '_blank', 'noopener,noreferrer');
+  });
+
+  // ─── Anchor status indicator + manual override ─────────────────────────
+  // The anchor (where the model sits vertically) comes from one of:
+  //   1. Elevation API (deterministic, ideal).
+  //   2. Raycast against loaded tiles (non-deterministic, can land high).
+  //   3. Manual override (user-typed metres MSL).
+  // Show the source + value in a small badge so when something looks wrong
+  // visually, the user can tell at a glance which mode is active and either
+  // re-try or override.
+  const anchorStatusEl  = document.getElementById('g3d-anchor-status');
+  const elevOverrideEl  = document.getElementById('g3d-elev-override');
+  let _anchorSource = '⏳';
+  function setAnchorStatus(source, elevMeters) {
+    _anchorSource = source;
+    if (!anchorStatusEl) return;
+    const colors = { api: '#7fe091', raycast: '#ffb455', manual: '#7fd0ff', fail: '#ff7a7a', loading: '#bbb' };
+    const labels = { api: 'API ✓', raycast: 'raycast ⚠', manual: 'manual ✋', fail: 'sin anchor ❌', loading: '⏳' };
+    anchorStatusEl.innerHTML = 'Anchor: <span style="color:' + (colors[source] || '#fff') + '">' + labels[source] + '</span>'
+      + (elevMeters != null ? ' · ' + elevMeters.toFixed(1) + ' m' : '');
+  }
+  setAnchorStatus(_apiElevation != null ? 'api' : 'loading',
+                  _apiElevation != null ? _apiElevation : null);
+
+  // Watcher: when _groundAnchor lands via raycast, update the badge.
+  // (Polled in the anchor interval rather than via event because the existing
+  // anchor functions are closures that don't fire events.)
+  const _anchorWatch = setInterval(() => {
+    if (!_groundAnchor) return;
+    const elev = _groundAnchor.length() - _targetSurface.length();
+    if (_anchorSource === 'loading' || _anchorSource === 'fail') {
+      setAnchorStatus(_apiElevation != null ? 'api' : 'raycast', elev);
+    }
+  }, 500);
+  tiles._anchorWatch = _anchorWatch;
+
+  // Re-anclar: clear the anchor and let the interval re-acquire it (also
+  // re-fetches the Elevation API in case it was a transient failure).
+  document.getElementById('g3d-reanchor').addEventListener('click', async () => {
+    setAnchorStatus('loading');
+    _groundAnchor = null;
+    if (modelRoot) modelRoot.visible = false;
+    // Re-call Elevation API (the const is closure-bound, can't reassign — use
+    // a wrapper). Easiest: clear and just let raycast try again. To re-fetch
+    // API, set a flag the interval can check.
+    const newElev = await fetchGroundElevation(lat, lon, apiKey);
+    if (newElev != null) {
+      _groundAnchor = latLonToECEF(lat, lon, newElev);
+      applyGeoTransform();
+      if (modelRoot) modelRoot.visible = true;
+      controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+      setAnchorStatus('api', newElev);
+      console.log('[Google 3D] 🎯 re-anclado vía Elevation API · elev=' + newElev.toFixed(1) + 'm');
+    } else {
+      setAnchorStatus('raycast');
+      console.log('[Google 3D] 🎯 re-anclando vía raycast — esperá unos segundos');
+    }
+  });
+
+  // Manual elevation override: skip everything automatic and place the model
+  // at exactly the elevation the user typed. Useful when both API and raycast
+  // produce wrong results for an unusual location.
+  document.getElementById('g3d-elev-apply').addEventListener('click', () => {
+    const v = parseFloat(elevOverrideEl.value);
+    if (!isFinite(v)) { alert('Ingresá una elevación válida en metros.'); return; }
+    _groundAnchor = latLonToECEF(lat, lon, v);
+    applyGeoTransform();
+    if (modelRoot) modelRoot.visible = true;
+    controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+    setAnchorStatus('manual', v);
+    console.log('[Google 3D] ✋ anchor manual · elev=' + v.toFixed(1) + 'm');
   });
 
   // Screenshot of the current 3D view. Saves a PNG with the lat/lon and
