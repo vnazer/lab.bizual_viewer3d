@@ -481,7 +481,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   }
   const { W, H } = fitSize();
 
-  const camera = new THREE.PerspectiveCamera(60, W / H, 1, 160_000_000);
+  // Camera near/far: near=0.5 lets us inspect façades from a few cm away;
+  // far=20_000 is the maximum useful range for street/aerial views around
+  // a single lot. Previous far=160_000_000 (effectively unbounded) made the
+  // tiles renderer keep distant low-LOD tiles inside the frustum, eating
+  // download/parse budget that should have gone to the high-res Maxar
+  // tiles immediately around the building. With logarithmicDepthBuffer the
+  // 40 000× near/far ratio is fine for depth precision.
+  const camera = new THREE.PerspectiveCamera(60, W / H, 0.5, 20_000);
   // Start close to the surface so screen-space error is high enough that the
   // tiles renderer refines past the global basemap into Maxar 3D tiles.
   // The ground anchor below re-frames the camera once it finds real terrain.
@@ -621,7 +628,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // Let the user scroll-zoom right up to the model (3 m) or all the way out
   // to space; previously the 100 m floor blocked street-level inspection.
   controls.minDistance = 3;
-  controls.maxDistance = 5_000_000;
+  // Match camera.far=20_000; zooming further out would put the ground past
+  // the far plane and the user would see nothing while wasting GPU/network.
+  // For lot-scale inspection (street level to ~5 km aerial) this is plenty.
+  controls.maxDistance = 15_000;
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
   controls.screenSpacePanning = false;
@@ -1318,6 +1328,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     // ~0 dimension floods the WebGL context with errors and breaks rendering.
     if (canvas.clientWidth < 8 || canvas.clientHeight < 8) return;
     controls.update();
+    // Per-frame LOD pipeline for Google Photorealistic 3D Tiles.
+    //   setCamera + setResolutionFromRenderer feed the renderer the active
+    //     camera matrix and the canvas size in CSS pixels — that's what
+    //     drives the screen-space-error calculation (and therefore which
+    //     LODs get requested from tile.googleapis.com).
+    //   update() walks the tile tree, marks tiles to download/unload, and
+    //     applies fade transitions. MUST run every frame, not on an
+    //     interval — skipping it freezes the world at the last LOD.
     tiles.setCamera(camera);
     tiles.setResolutionFromRenderer(camera, renderer);
     tiles.update();
