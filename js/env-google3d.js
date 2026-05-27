@@ -751,6 +751,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return { hit: bestHit, elev: bestElev, max: elevs[elevs.length - 1], count: elevs.length, rejected: rejectedFar };
   }
 
+  // Move the orbit target to the model and tween the camera close so the
+  // tiles renderer is forced to refine Maxar tiles near the building.
+  // Without this, the initial 800 m-above-ellipsoid camera position
+  // produces the "flat tan terrain" view where the renderer is happy with
+  // coarse global tiles because the model is far from the camera.
+  function frameOnAnchor() {
+    if (!_groundAnchor) return;
+    const lookAt  = _groundAnchor.clone().addScaledVector(_up, 15);
+    const eyePos  = _groundAnchor.clone()
+      .addScaledVector(_east, 60)
+      .addScaledVector(_up,   40);
+    controls.target.copy(lookAt);
+    animateCameraTo(camera, controls, eyePos, lookAt, 1400);
+  }
+
   function tryAnchorGround() {
     if (_groundAnchor) return true;
 
@@ -762,7 +777,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _groundAnchor = latLonToECEF(lat, lon, _apiElevation);
       applyGeoTransform();
       if (modelRoot) modelRoot.visible = true;
-      controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+      frameOnAnchor(); // tween camera close so Maxar refines around the model
       console.log('[Google 3D] ✅ modelo anclado vía Elevation API · elev=' + _apiElevation.toFixed(1) + 'm');
       return true;
     }
@@ -778,7 +793,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _groundAnchor = r.hit;
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
-    controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+    frameOnAnchor();
     console.log('[Google 3D] ✅ modelo anclado (raycast fallback)',
                 '· suelo (min) ≈ ' + r.elev.toFixed(1) + 'm sobre elipsoide',
                 '· techos (max) ≈ ' + r.max.toFixed(1) + 'm',
@@ -1056,7 +1071,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         motionTracking: false,
         motionTrackingControl: false,
       });
-      _svRenderer = new THREE.WebGLRenderer({ canvas: svCanvas, alpha: true, antialias: true, preserveDrawingBuffer: true });
+      _svRenderer = new THREE.WebGLRenderer({
+        canvas: svCanvas, alpha: true, antialias: true, preserveDrawingBuffer: true,
+        // Same as the main renderer — without log depth, single-precision
+        // depth at ECEF scale (~6.4 M m from origin) collapses and the
+        // overlaid model renders invisible / z-fights the panorama.
+        logarithmicDepthBuffer: true,
+      });
       _svRenderer.setPixelRatio(window.devicePixelRatio);
       _svScene = new THREE.Scene();
       // Clone the loaded model so we have an instance to render in this
@@ -1197,7 +1218,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _groundAnchor = latLonToECEF(lat, lon, newElev);
       applyGeoTransform();
       if (modelRoot) modelRoot.visible = true;
-      controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+      frameOnAnchor();
       setAnchorStatus('api', newElev);
       console.log('[Google 3D] 🎯 re-anclado vía Elevation API · elev=' + newElev.toFixed(1) + 'm');
     } else {
@@ -1215,7 +1236,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _groundAnchor = latLonToECEF(lat, lon, v);
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
-    controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+    frameOnAnchor();
     setAnchorStatus('manual', v);
     console.log('[Google 3D] ✋ anchor manual · elev=' + v.toFixed(1) + 'm');
   });
