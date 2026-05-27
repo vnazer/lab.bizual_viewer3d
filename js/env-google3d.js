@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader }   from 'three/addons/loaders/DRACOLoader.js';
+import { KTX2Loader }    from 'three/addons/loaders/KTX2Loader.js';
 import { RGBELoader }    from 'three/addons/loaders/RGBELoader.js';
 
 import { TilesRenderer, WGS84_ELLIPSOID } from '3d-tiles-renderer';
@@ -21,6 +22,10 @@ import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 
 const GOOGLE_TILES_URL = 'https://tile.googleapis.com/v1/3dtiles/root.json';
 const DRACO_DECODER    = 'https://www.gstatic.com/draco/v1/decoders/';
+// Basis Universal transcoder — Google Maxar tiles ship textures in KTX2,
+// without this decoder GLTFLoader hits `texture.source.uri` undefined and
+// the tile mesh crashes silently (only the global Landsat basemap renders).
+const KTX2_TRANSCODER  = 'https://unpkg.com/three@0.184.0/examples/jsm/libs/basis/';
 
 const LAB_HDRI_PRESETS = {
   street:     './hdri/wide_street_01_2k.hdr',
@@ -514,7 +519,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // versions and skip the auth-pipeline preprocessing.
   const tiles = new TilesRenderer();
   tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: apiKey, autoRefreshToken: true }));
-  tiles.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader: makeDraco() }));
+  tiles.registerPlugin(new GLTFExtensionsPlugin({
+    dracoLoader: makeDraco(),
+    ktxLoader:   makeKtx2(renderer),
+  }));
   tiles.registerPlugin(new UnloadTilesPlugin());
   tiles.registerPlugin(new TileCompressionPlugin());
 
@@ -879,6 +887,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   const loader = new GLTFLoader();
   loader.setDRACOLoader(makeDraco());
+  loader.setKTX2Loader(makeKtx2(renderer));
   loader.load(modelUrl, (gltf) => {
     const model = gltf.scene;
     model.traverse((c) => {
@@ -1312,4 +1321,11 @@ function makeDraco() {
   d.setDecoderPath(DRACO_DECODER);
   d.setDecoderConfig({ type: 'js' });
   return d;
+}
+
+function makeKtx2(renderer) {
+  const k = new KTX2Loader();
+  k.setTranscoderPath(KTX2_TRANSCODER);
+  if (renderer && k.detectSupport) k.detectSupport(renderer);
+  return k;
 }
