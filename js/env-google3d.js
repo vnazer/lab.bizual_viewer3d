@@ -114,9 +114,10 @@ export function closeGoogle3DPanel() {
   if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
   if (_resizeObs) { _resizeObs.disconnect(); _resizeObs = null; }
   if (_activeTiles) {
-    if (_activeTiles._statsInterval) clearInterval(_activeTiles._statsInterval);
-    if (_activeTiles._anchorInterval) clearInterval(_activeTiles._anchorInterval);
-    if (_activeTiles._anchorWatch) clearInterval(_activeTiles._anchorWatch);
+    if (_activeTiles._statsInterval)   clearInterval(_activeTiles._statsInterval);
+    if (_activeTiles._anchorInterval)  clearInterval(_activeTiles._anchorInterval);
+    if (_activeTiles._anchorWatch)     clearInterval(_activeTiles._anchorWatch);
+    if (_activeTiles._reAnchorTimer)   clearInterval(_activeTiles._reAnchorTimer);
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
     try { _activeTiles.dispose(); } catch {}
     _activeTiles = null;
@@ -342,7 +343,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // calidad=1 → 22 (fast, basemap-ish). Floor at 0.5 because errorTarget=0
   // makes the renderer thrash on tiles it can never satisfy.
   const calidadToErrorTarget = (c) => {
-    if (c >= 10) return 0.5;
+    if (c >= 10) return 0.1;
+    if (c >= 9)  return 0.5;
     return Math.max(0.5, +(22.5 - c * 2.2).toFixed(1));
   };
   // Resolution scale (devicePixelRatio multiplier) follows quality so a
@@ -779,7 +781,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         const origin = baseOrigin.clone().addScaledVector(_east, dE).addScaledVector(_north, dN);
         _groundRay.set(origin, dir);
         _groundRay.far = 12000;
-        const hits = _groundRay.intersectObject(tiles.group, false);
+        // Recursive: each Maxar tile is a child scene under tiles.group with
+        // its own mesh children. Non-recursive would only hit the group
+        // itself (no geometry). Also note that modelRoot is a sibling under
+        // scene.add(), not a child of tiles.group, so the building is
+        // already excluded from these ray targets.
+        const hits = _groundRay.intersectObject(tiles.group, true);
         if (!hits.length) continue;
         const elev = hits[0].point.length() - ellipsoidR;
         if (elev < -500 || elev > 9000) continue;
@@ -1283,15 +1290,19 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   }, 500);
   tiles._anchorWatch = _anchorWatch;
 
-  // Re-anclar: clear the anchor and let the interval re-acquire it (also
-  // re-fetches the Elevation API in case it was a transient failure).
+  // Re-anclar: set an initial anchor from the Elevation API (orthometric
+  // estimate) and then run a continuous raycast-snap loop for 2 s. The
+  // previous behaviour took a single API value and stopped — but the API
+  // returns geoid-referenced height while Maxar tiles use ellipsoid height,
+  // so the model would visibly drop or jump. Streaming the raycast across
+  // a 2 s window lets the building converge to the actual high-LOD tile
+  // surface as Maxar refines around the lot.
   document.getElementById('g3d-reanchor').addEventListener('click', async () => {
+    if (tiles._reAnchorTimer) { clearInterval(tiles._reAnchorTimer); tiles._reAnchorTimer = null; }
     setAnchorStatus('loading');
     _groundAnchor = null;
     if (modelRoot) modelRoot.visible = false;
-    // Re-call Elevation API (the const is closure-bound, can't reassign — use
-    // a wrapper). Easiest: clear and just let raycast try again. To re-fetch
-    // API, set a flag the interval can check.
+
     const newElev = await fetchGroundElevation(lat, lon, apiKey);
     if (newElev != null) {
       _groundAnchor = latLonToECEF(lat, lon, newElev);
@@ -1299,11 +1310,32 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       if (modelRoot) modelRoot.visible = true;
       frameOnAnchor();
       setAnchorStatus('api', newElev);
-      console.log('[Google 3D] 🎯 re-anclado vía Elevation API · elev=' + newElev.toFixed(1) + 'm');
+      console.log('[Google 3D] 🎯 re-anclado vía Elevation API · elev=' + newElev.toFixed(1) + 'm · refinando contra Maxar…');
     } else {
       setAnchorStatus('raycast');
       console.log('[Google 3D] 🎯 re-anclando vía raycast — esperá unos segundos');
     }
+
+    // 2-second continuous snap loop. Every 250 ms we raycast against the
+    // currently-loaded tiles. As Maxar streams in higher LODs the hit
+    // converges to the real ground; the existing ±200 m delta cap inside
+    // refineAnchorGround() rejects spurious far-tile hits.
+    const t0 = performance.now();
+    tiles._reAnchorTimer = setInterval(() => {
+      if (!_groundAnchor) {
+        tryAnchorGround();
+      } else {
+        refineAnchorGround();
+      }
+      if (performance.now() - t0 >= 2000) {
+        clearInterval(tiles._reAnchorTimer);
+        tiles._reAnchorTimer = null;
+        const finalElev = _groundAnchor
+          ? (_groundAnchor.length() - _targetSurface.length()).toFixed(1)
+          : '?';
+        console.log('[Google 3D] 🎯 snap continuo terminado · elev final ≈ ' + finalElev + ' m');
+      }
+    }, 250);
   });
 
   // Manual elevation override: skip everything automatic and place the model
