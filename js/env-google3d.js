@@ -183,6 +183,33 @@ async function preflightKey(apiKey) {
   }
 }
 
+// Ground elevation lookup via the Google Elevation API. Returns metres above
+// sea level for the (lat, lon) point, or null if the API isn't available
+// (key not enabled, network error, etc.). Used as the primary anchor source
+// so model placement is deterministic — no more dependence on which tiles
+// happened to be loaded when the raycast fired.
+async function fetchGroundElevation(lat, lon, apiKey) {
+  const url = 'https://maps.googleapis.com/maps/api/elevation/json'
+    + '?locations=' + lat + ',' + lon
+    + '&key=' + encodeURIComponent(apiKey);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn('[Google 3D] Elevation API HTTP ' + res.status + ' — fallback al raycast');
+      return null;
+    }
+    const data = await res.json();
+    if (data.status !== 'OK' || !data.results?.[0]) {
+      console.warn('[Google 3D] Elevation API: ' + data.status + (data.error_message ? ' · ' + data.error_message : '') + ' — fallback al raycast');
+      return null;
+    }
+    return data.results[0].elevation;
+  } catch (e) {
+    console.warn('[Google 3D] Elevation API fetch falló:', e.message);
+    return null;
+  }
+}
+
 function showPreflightError(detail) {
   const overlay = document.createElement('div');
   overlay.id = 'g3d-key-dialog';
@@ -239,6 +266,16 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return;
   }
   console.log('[Google 3D] preflight ✅ key works');
+
+  // Definitive ground elevation via Elevation API — eliminates the raycast's
+  // dependence on which tiles happen to be loaded first. If the API isn't
+  // enabled on the key, falls back to raycast (existing behaviour).
+  const _apiElevation = await fetchGroundElevation(lat, lon, apiKey);
+  if (_apiElevation != null) {
+    console.log('[Google 3D] ✅ Elevation API: terreno a ' + _apiElevation.toFixed(1) + ' m sobre nivel del mar (anchor determinístico)');
+  } else {
+    console.log('[Google 3D] Elevation API no disponible — usando raycast contra tiles. Para placement determinístico, habilitá "Elevation API" en tu Google Cloud key.');
+  }
 
   closeGoogle3DPanel();
 
@@ -643,6 +680,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   function tryAnchorGround() {
     if (_groundAnchor) return true;
+
+    // ── Fast path: Elevation API gave a definitive ground height. ──
+    // We use this whenever it's available because it doesn't depend on
+    // which tiles are loaded right now (the raycast path was producing
+    // 568, 1071, 5416 m on different sessions for the same address).
+    if (_apiElevation != null) {
+      _groundAnchor = latLonToECEF(lat, lon, _apiElevation);
+      applyGeoTransform();
+      if (modelRoot) modelRoot.visible = true;
+      controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
+      console.log('[Google 3D] ✅ modelo anclado vía Elevation API · elev=' + _apiElevation.toFixed(1) + 'm');
+      return true;
+    }
+
+    // ── Fallback path: raycast against currently-loaded tiles. ──
     if (!tiles.group || (tiles.visibleTiles?.size || 0) < 10) return false;
     const r = sampleGround();
     if (!r) return false;
@@ -653,17 +705,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _groundAnchor = r.hit;
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
-    // Centre the orbit on the model but DO NOT tween the camera up to the
-    // anchor. The initial anchor often lands on a coarse global-terrain tile
-    // (e.g. Macul reads ~1071 m when the global dataset smoothed nearby
-    // Cordillera into the airspace). Tweening the camera up to that altitude
-    // takes it far from Maxar's effective LOD range, so Maxar never refines
-    // and the view stays blurry → no way for the refinement loop to find
-    // real ground. Keep the camera at its initial 800 m altitude where Maxar
-    // does refine; the refinement loop below brings the anchor (and orbit
-    // target) down to the real ground over the next few seconds.
     controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
-    console.log('[Google 3D] ✅ modelo anclado',
+    console.log('[Google 3D] ✅ modelo anclado (raycast fallback)',
                 '· suelo (min) ≈ ' + r.elev.toFixed(1) + 'm sobre elipsoide',
                 '· techos (max) ≈ ' + r.max.toFixed(1) + 'm',
                 '· hits válidos=' + r.count + '/25',
@@ -704,7 +747,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   let _refineTicks = 0;
   const _anchorInterval = setInterval(() => {
     if (!_groundAnchor) {
-      if (tryAnchorGround()) return; // initial success — stay on, start refining
+      if (tryAnchorGround()) {
+        // If the API gave the anchor, there's nothing to refine — it's
+        // already the real ground elevation. Stop polling immediately.
+        if (_apiElevation != null) {
+          clearInterval(_anchorInterval);
+        }
+        return;
+      }
       _anchorTries++;
       if (_anchorTries % 6 === 0) {
         console.log('[Google 3D] raycast aún sin suelo · visibleTiles=' + (tiles.visibleTiles?.size || 0) +
