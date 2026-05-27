@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader }   from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader }    from 'three/addons/loaders/KTX2Loader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader }    from 'three/addons/loaders/RGBELoader.js';
 
 import { TilesRenderer, WGS84_ELLIPSOID } from '3d-tiles-renderer';
@@ -469,8 +470,11 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   _activeRenderer = renderer;
 
   function fitSize() {
-    const W = canvas.clientWidth || window.innerWidth;
-    const H = canvas.clientHeight || (window.innerHeight - 110);
+    // Guard against the panel being briefly collapsed/hidden — clientWidth
+    // can return 0, which made the renderer emit GL_INVALID_VALUE on
+    // glViewport(negative w/h) and skip the frame entirely.
+    const W = Math.max(8, canvas.clientWidth || window.innerWidth);
+    const H = Math.max(8, canvas.clientHeight || (window.innerHeight - 110));
     renderer.setSize(W, H, false);
     return { W, H };
   }
@@ -519,9 +523,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // versions and skip the auth-pipeline preprocessing.
   const tiles = new TilesRenderer();
   tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: apiKey, autoRefreshToken: true }));
+  // Google Maxar tiles use Draco for geometry + KTX2/Basis for textures +
+  // EXT_meshopt_compression for vertex/index buffers. Missing any of these
+  // decoders leaves the tile mesh as garbage (fishnet pattern of degenerate
+  // triangles on a blank ground) even though the GLB parses without error.
   tiles.registerPlugin(new GLTFExtensionsPlugin({
-    dracoLoader: makeDraco(),
-    ktxLoader:   makeKtx2(renderer),
+    dracoLoader:    makeDraco(),
+    ktxLoader:      makeKtx2(renderer),
+    meshoptDecoder: MeshoptDecoder,
   }));
   tiles.registerPlugin(new UnloadTilesPlugin());
   tiles.registerPlugin(new TileCompressionPlugin());
@@ -888,6 +897,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const loader = new GLTFLoader();
   loader.setDRACOLoader(makeDraco());
   loader.setKTX2Loader(makeKtx2(renderer));
+  loader.setMeshoptDecoder(MeshoptDecoder);
   loader.load(modelUrl, (gltf) => {
     const model = gltf.scene;
     model.traverse((c) => {
