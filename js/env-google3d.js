@@ -500,12 +500,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // more detail (heavier), higher = lighter. Cache + queue sizes are bounded so
   // a long session doesn't saturate memory or the network.
   tiles.errorTarget = calidadToErrorTarget(sQ);
-  // Larger cache + more parallel jobs so the user can orbit close to the
-  // model without Maxar tiles being evicted/re-downloaded every move.
-  tiles.lruCache.minSize = 1000;
-  tiles.lruCache.maxSize = 1800;
-  tiles.downloadQueue.maxJobs = 16;
-  tiles.parseQueue.maxJobs = 8;
+  // Tile budget. Previous bigger sizes (1000/1800) starved the download
+  // queue — at full cache the renderer stops requesting new tiles, so
+  // stale low-LOD basemap stays in front of the user instead of getting
+  // refreshed with Maxar. Smaller cache forces healthy turnover.
+  tiles.lruCache.minSize = 600;
+  tiles.lruCache.maxSize = 900;
+  tiles.downloadQueue.maxJobs = 10;
+  tiles.parseQueue.maxJobs = 5;
 
   tiles.setCamera(camera);
   tiles.setResolutionFromRenderer(camera, renderer);
@@ -553,23 +555,25 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     if (/429/.test(status)) console.error('[Google 3D] → 429: rate limit / cuota excedida');
   });
   tiles.addEventListener('load-content', (e) => {
-    // Apply maximum anisotropic filtering to every Maxar tile texture as it
-    // arrives. Without this, textures viewed at oblique angles (street view
-    // looking at façades, distant rooftops) pixelate severely. This is the
-    // single biggest visual quality boost we can do client-side.
+    // Boost anisotropic filtering on each Maxar tile texture for sharper
+    // sampling at oblique angles. Important: only touch the texture after
+    // its image has actually loaded, and DON'T flip needsUpdate — forcing
+    // a re-upload of every tile texture caused some tiles to render as
+    // un-textured wireframe meshes ("fishnet" on the ground). Anisotropy
+    // is a sampler param that three.js picks up on next bind without
+    // needing a full re-upload of the pixel data.
     const tileScene = e?.scene || e?.tile?.cached?.scene;
-    if (tileScene && tileScene.traverse) {
-      tileScene.traverse((obj) => {
-        if (!obj.isMesh || !obj.material) return;
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of mats) {
-          if (m.map && m.map.anisotropy !== _maxAniso) {
-            m.map.anisotropy = _maxAniso;
-            m.map.needsUpdate = true;
-          }
-        }
-      });
-    }
+    if (!tileScene || !tileScene.traverse) return;
+    tileScene.traverse((obj) => {
+      if (!obj.isMesh || !obj.material) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) {
+        const t = m.map;
+        if (!t) continue;
+        if (!t.image || !t.image.width) continue; // image not ready yet
+        if (t.anisotropy < _maxAniso) t.anisotropy = _maxAniso;
+      }
+    });
   });
 
   // Periodic stats — uses the actual property names from 0.4.7.
