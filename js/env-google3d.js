@@ -109,6 +109,7 @@ export function closeGoogle3DPanel() {
   if (_activeTiles) {
     if (_activeTiles._statsInterval) clearInterval(_activeTiles._statsInterval);
     if (_activeTiles._anchorInterval) clearInterval(_activeTiles._anchorInterval);
+    if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
     try { _activeTiles.dispose(); } catch {}
     _activeTiles = null;
   }
@@ -325,10 +326,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       </div>
     </div>
     <canvas id="g3d-canvas"></canvas>
-    <div id="g3d-sv-overlay" style="display:none;position:absolute;top:48px;left:0;right:0;bottom:88px;z-index:50;background:#000">
-      <iframe id="g3d-sv-iframe" allowfullscreen style="width:100%;height:100%;border:0;display:block"></iframe>
-      <button id="g3d-sv-close" title="Cerrar Street View (Esc)"
-              style="position:absolute;top:8px;right:8px;z-index:51;background:rgba(0,0,0,0.7);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:4px;padding:6px 12px;cursor:pointer;font-size:13px;">✕ Cerrar</button>
+    <div id="g3d-svfull" style="display:none;position:absolute;top:48px;left:0;right:0;bottom:88px;z-index:50;background:#000">
+      <div id="g3d-svpano" style="position:absolute;inset:0"></div>
+      <canvas id="g3d-svcanvas" style="position:absolute;inset:0;pointer-events:none"></canvas>
+      <button id="g3d-svfull-close" title="Cerrar (Esc)"
+              style="position:absolute;top:8px;right:8px;z-index:51;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:4px;padding:6px 12px;cursor:pointer;font-size:13px;">✕ Cerrar</button>
+      <div id="g3d-svfull-hint" style="position:absolute;top:8px;left:8px;z-index:51;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:4px;padding:6px 12px;font-size:12px;max-width:380px;line-height:1.3;">
+        🎬 <strong>Modelo sobre Street View real.</strong> Movete con las flechas del panorama. La cámara del modelo se sincroniza con la del Street View para que veas el edificio donde realmente va a estar.
+      </div>
     </div>
     <div class="g3d-bottom">
       <div class="g3d-sliders">
@@ -368,7 +373,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       <div class="g3d-quality">
         <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
         <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
-        <button id="g3d-view-sv" title="Abre Street View real de Google en una pestaña nueva, centrado en estas coordenadas. El modelo 3D no aparece encima (es una vista alternativa para ver el lugar real con fotos).">🌆 Street View</button>
+        <button id="g3d-view-sv" title="Sobrepone el modelo 3D sobre las fotos panorámicas reales de Google Street View. La cámara del modelo se sincroniza con la del panorama así caminás por la calle real y ves el edificio en su ubicación.">🎬 Modelo sobre Street View</button>
+        <button id="g3d-view-sv-tab" title="Abre Google Street View en una pestaña nueva (sin el modelo 3D encima).">🌆 SV (pestaña)</button>
         <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
         <button id="g3d-quality-photo" title="Sube la calidad de tiles al máximo (errorTarget=4) para que se vean ultra-nítidos. Tarda más en cargar pero ideal antes de capturar.">📸 Calidad</button>
         <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido.">⚡ Rápido</button>
@@ -386,7 +392,16 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const k = (prompt('Google Maps API key:', getGoogleApiKey()) || '').trim();
     if (k) { saveGoogleApiKey(k); closeGoogle3DPanel(); openGoogle3DPanel(coords, modelUrl); }
   });
-  const escHandler = (e) => { if (e.key === 'Escape') closeGoogle3DPanel(); };
+  const escHandler = (e) => {
+    if (e.key !== 'Escape') return;
+    // If the SV+3D overlay is open, Esc closes it first instead of the panel.
+    const sv = document.getElementById('g3d-svfull');
+    if (sv && sv.style.display === 'block') {
+      document.getElementById('g3d-svfull-close')?.click();
+      return;
+    }
+    closeGoogle3DPanel();
+  };
   document.addEventListener('keydown', escHandler);
   panel._escHandler = escHandler;
 
@@ -981,15 +996,141 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     animateCameraTo(camera, controls, eyePos, lookAt, 1200);
   });
 
-  // Street View — open in a new browser tab using Google's official public
-  // URL (api=1&map_action=pano). This doesn't need any API key or referer
-  // setup and always finds the nearest available panorama. The previous
-  // iframe-embed approach (Maps Embed API) was unreliable: black screen
-  // when restrictions blocked it or no panorama exists at the exact spot.
-  // Hiding the unused overlay so it doesn't sit behind the canvas.
-  const svOverlay = document.getElementById('g3d-sv-overlay');
-  if (svOverlay) svOverlay.style.display = 'none';
-  document.getElementById('g3d-view-sv').addEventListener('click', () => {
+  // ─── Street View + 3D model overlay ────────────────────────────────────
+  // Renders Google's photographic Street View as the background and our 3D
+  // model on a transparent canvas on top, with the model's camera locked to
+  // the StreetViewPanorama's position/heading/pitch/zoom. The user gets to
+  // walk the real street in panoramic photos and see exactly where the
+  // planned building stands in that environment.
+  let _svPanorama = null, _svRenderer = null, _svScene = null, _svCamera = null;
+  let _svAnimFrame = null, _svModelRoot = null;
+  function ensureGoogleMapsJS() {
+    if (window.google?.maps?.StreetViewPanorama) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const cb = '__g3dGmapsReady_' + Math.random().toString(36).slice(2);
+      window[cb] = () => { delete window[cb]; resolve(); };
+      const s = document.createElement('script');
+      s.async = true;
+      s.src = 'https://maps.googleapis.com/maps/api/js'
+        + '?key=' + encodeURIComponent(apiKey)
+        + '&callback=' + cb;
+      s.onerror = () => reject(new Error('No se pudo cargar Maps JS (¿"Maps JavaScript API" habilitada?)'));
+      document.head.appendChild(s);
+    });
+  }
+  async function openStreetViewOverlay() {
+    if (!modelRoot) { alert('Esperá a que termine de cargar el modelo.'); return; }
+    const overlay  = document.getElementById('g3d-svfull');
+    const panoDiv  = document.getElementById('g3d-svpano');
+    const svCanvas = document.getElementById('g3d-svcanvas');
+    overlay.style.display = 'block';
+    try {
+      await ensureGoogleMapsJS();
+    } catch (err) {
+      overlay.style.display = 'none';
+      alert('Error cargando Maps JavaScript API: ' + err.message);
+      return;
+    }
+    if (!_svPanorama) {
+      _svPanorama = new google.maps.StreetViewPanorama(panoDiv, {
+        position: { lat, lng: lon },
+        pov: { heading: 0, pitch: 0 },
+        zoom: 1,
+        addressControl: false,
+        panControl: false,
+        enableCloseButton: false,
+        fullscreenControl: false,
+        motionTracking: false,
+        motionTrackingControl: false,
+      });
+      _svRenderer = new THREE.WebGLRenderer({ canvas: svCanvas, alpha: true, antialias: true, preserveDrawingBuffer: true });
+      _svRenderer.setPixelRatio(window.devicePixelRatio);
+      _svScene = new THREE.Scene();
+      // Clone the loaded model so we have an instance to render in this
+      // separate scene without removing it from the main 3D view.
+      _svModelRoot = new THREE.Group();
+      _svModelRoot.matrixAutoUpdate = false;
+      const clone = modelRoot.children[0].clone(true);
+      _svModelRoot.add(clone);
+      _svScene.add(_svModelRoot);
+      // Match the model's material handling (depth, shadows) on the clone.
+      _svModelRoot.traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of mats) { m.depthTest = true; m.depthWrite = true; }
+      });
+      _svCamera = new THREE.PerspectiveCamera(90, 1, 1, 5e7);
+      const sizeSV = () => {
+        const w = svCanvas.clientWidth || 1, h = svCanvas.clientHeight || 1;
+        _svRenderer.setSize(w, h, false);
+        _svCamera.aspect = w / h;
+        _svCamera.updateProjectionMatrix();
+      };
+      new ResizeObserver(sizeSV).observe(svCanvas);
+      sizeSV();
+      svAnimate();
+    } else {
+      _svPanorama.setVisible(true);
+    }
+  }
+  function svAnimate() {
+    _svAnimFrame = requestAnimationFrame(svAnimate);
+    if (!_svPanorama || !_svRenderer) return;
+    const pos = _svPanorama.getPosition();
+    const pov = _svPanorama.getPov();
+    if (!pos || !pov) return;
+    const pLat = pos.lat(), pLng = pos.lng();
+    // Camera position: Street View's pano location at observer height (Google's
+    // cameras sit ~2.5 m above ground). Use the Elevation API ground value if
+    // available, otherwise the same as the model's anchor.
+    const groundElev = (_apiElevation != null)
+      ? _apiElevation
+      : (_groundAnchor ? (_groundAnchor.length() - _targetSurface.length()) : 0);
+    const camPos = new THREE.Vector3();
+    WGS84_ELLIPSOID.getCartographicToPosition(pLat * DEG2RAD, pLng * DEG2RAD, groundElev + 2.5, camPos);
+    // Heading 0=N, 90=E (clockwise). Pitch 0=horizontal, +up.
+    const hRad = pov.heading * Math.PI / 180;
+    const pRad = pov.pitch   * Math.PI / 180;
+    const eV = new THREE.Vector3(), nV = new THREE.Vector3(), uV = new THREE.Vector3();
+    WGS84_ELLIPSOID.getEastNorthUpAxes(pLat * DEG2RAD, pLng * DEG2RAD, eV, nV, uV);
+    const lookDir = new THREE.Vector3()
+      .addScaledVector(eV, Math.sin(hRad) * Math.cos(pRad))
+      .addScaledVector(nV, Math.cos(hRad) * Math.cos(pRad))
+      .addScaledVector(uV, Math.sin(pRad));
+    _svCamera.position.copy(camPos);
+    _svCamera.up.copy(uV);
+    _svCamera.lookAt(camPos.clone().add(lookDir));
+    // Street View FOV decreases with zoom (~180°/2^zoom).
+    const z = _svPanorama.getZoom() || 1;
+    const fovDeg = Math.max(20, Math.min(120, 180 / Math.pow(2, z)));
+    if (Math.abs(_svCamera.fov - fovDeg) > 0.5) {
+      _svCamera.fov = fovDeg;
+      _svCamera.updateProjectionMatrix();
+    }
+    // Mirror the model's transform from the main scene (user offsets, scale,
+    // rotation all show through here).
+    _svModelRoot.matrix.copy(modelRoot.matrix);
+    _svModelRoot.matrixWorldNeedsUpdate = true;
+    _svRenderer.render(_svScene, _svCamera);
+  }
+  function closeStreetViewOverlay() {
+    const overlay = document.getElementById('g3d-svfull');
+    if (overlay) overlay.style.display = 'none';
+    if (_svAnimFrame) { cancelAnimationFrame(_svAnimFrame); _svAnimFrame = null; }
+  }
+  // Register teardown so closeGoogle3DPanel can stop the SV render loop and
+  // dispose its renderer even if the user closes the whole panel while the
+  // overlay is open.
+  tiles._svCleanup = () => {
+    if (_svAnimFrame) { cancelAnimationFrame(_svAnimFrame); _svAnimFrame = null; }
+    if (_svRenderer) { try { _svRenderer.dispose(); } catch {} _svRenderer = null; }
+    _svPanorama = null; _svScene = null; _svCamera = null; _svModelRoot = null;
+  };
+  document.getElementById('g3d-view-sv').addEventListener('click', openStreetViewOverlay);
+  document.getElementById('g3d-svfull-close').addEventListener('click', closeStreetViewOverlay);
+
+  // Secondary: open Google's Street View in a separate tab (no 3D overlay).
+  document.getElementById('g3d-view-sv-tab').addEventListener('click', () => {
     const url = 'https://www.google.com/maps/@?api=1&map_action=pano'
       + '&viewpoint=' + lat + ',' + lon;
     window.open(url, '_blank', 'noopener,noreferrer');
