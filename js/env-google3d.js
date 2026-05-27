@@ -622,42 +622,50 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
     });
 
-    // Orientation detection. The ENU frame here has local Z = world "up", so
-    // we need the model's vertical axis on Z. For a building, the tallest
-    // bbox dimension is the vertical: if that's Y the GLB is Y-up (glTF
-    // standard) and we rotate +90° around X so +Y maps to +Z; if it's Z, the
-    // model is already Z-up (Blender export) and stays as-is.
+    // ── 1) Orientation detection: for a building the tallest bbox extent is
+    // the vertical axis. If that's Y, the GLB is Y-up (glTF standard) and we
+    // rotate +90° around X so +Y becomes +Z (the ENU frame's "up" here);
+    // Z-up stays as-is; X-up rotates -90° around Y.
     let box = new THREE.Box3().setFromObject(model);
     const dims0 = box.getSize(new THREE.Vector3());
     const orient = (dims0.y >= dims0.x && dims0.y >= dims0.z) ? 'Y-up'
                  : (dims0.z >= dims0.x && dims0.z >= dims0.y) ? 'Z-up'
                  : 'X-up';
-    if (orient === 'Y-up') {
-      model.rotateX(Math.PI / 2);
-      box = new THREE.Box3().setFromObject(model);
-    } else if (orient === 'X-up') {
-      model.rotateY(-Math.PI / 2);
-      box = new THREE.Box3().setFromObject(model);
-    }
+    if (orient === 'Y-up') model.rotateX(Math.PI / 2);
+    else if (orient === 'X-up') model.rotateY(-Math.PI / 2);
 
-    const dims = box.getSize(new THREE.Vector3());
+    // ── 2) Base normalisation: after the orientation rotation, the model's
+    // origin can sit anywhere (UR3D-style exports often put it at the
+    // geometric centre, not the floor). Shift the model so its world bbox is
+    // centred on (0,0) horizontally and its base lands at z=0. Using sub()
+    // instead of set() preserves any pre-existing gltf root translation as a
+    // shift instead of overwriting it.
+    model.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(model);
     const center = box.getCenter(new THREE.Vector3());
-    // Recentre horizontals (X/Y) and lift along Z so the base reaches modelRoot
-    // origin (= ground anchor when applyGeoTransform runs).
-    model.position.set(-center.x, -center.y, -box.min.z);
+    model.position.sub(new THREE.Vector3(center.x, center.y, box.min.z));
+
+    // ── 3) Verify the normalisation worked. base.z should be ~0; if it
+    // isn't, a future GLB has something we didn't account for (e.g. a
+    // mesh with its own matrixAutoUpdate=false), and this log surfaces it.
+    model.updateMatrixWorld(true);
+    const finalBox = new THREE.Box3().setFromObject(model);
+    const finalDims = finalBox.getSize(new THREE.Vector3());
 
     modelRoot = new THREE.Group();
     modelRoot.add(model);
-    // Hidden until ground anchor finds the real terrain — avoids showing the
-    // model floating at the ellipsoid surface during the first 1-2s.
+    // Hidden until the ground anchor lands — avoids showing the model
+    // floating at the ellipsoid surface during the first 1-2s.
     modelRoot.visible = !!_groundAnchor;
     scene.add(modelRoot);
     applyGeoTransform();
-    window.__g3dModel = { model, box, modelRoot };
+    window.__g3dModel = { model, box: finalBox, modelRoot };
+
     console.log('[Google 3D] modelo cargado',
                 '· orient=' + orient + (orient !== 'Z-up' ? ' (rotado a Z-up)' : ''),
-                '· dims original (x,y,z) =', dims0.x.toFixed(1) + 'm', dims0.y.toFixed(1) + 'm', dims0.z.toFixed(1) + 'm',
-                '· altura efectiva=' + dims.z.toFixed(1) + 'm',
+                '· dims original (x,y,z) =', dims0.x.toFixed(1) + 'm', dims0.y.toFixed(1) + 'm', dims0.z.toFixed(1) + 'm');
+    console.log('[Google 3D] modelo normalizado · base en z=' + finalBox.min.z.toFixed(3) + 'm (esperado 0)',
+                '· dims finales (x,y,z) =', finalDims.x.toFixed(1) + 'm', finalDims.y.toFixed(1) + 'm', finalDims.z.toFixed(1) + 'm',
                 '· visible=' + modelRoot.visible);
   });
 
