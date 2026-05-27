@@ -20,6 +20,7 @@ import {
 
 import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
 import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
+import { sanitizeGLB } from './sanitize.js?v=20260519';
 
 const GOOGLE_TILES_URL = 'https://tile.googleapis.com/v1/3dtiles/root.json';
 const DRACO_DECODER    = 'https://www.gstatic.com/draco/v1/decoders/';
@@ -898,7 +899,15 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   loader.setDRACOLoader(makeDraco());
   loader.setKTX2Loader(makeKtx2(renderer));
   loader.setMeshoptDecoder(MeshoptDecoder);
-  loader.load(modelUrl, (gltf) => {
+
+  // Fetch + sanitize the user GLB before parsing. Same flow as scene.js:
+  // some Blender exports leave texture entries with no `source` and no
+  // EXT_texture_webp/avif extension, which crashes GLTFLoader with
+  // "Cannot read properties of undefined (reading 'uri')" deep in
+  // GLTFParser.loadTexture. The plain loader.load() path skips the sanitize
+  // step, so the user-reported TypeError on GLTFLoader.js:3222 persisted
+  // here even after KTX2/Meshopt decoders were wired up.
+  const onLoaded = (gltf) => {
     const model = gltf.scene;
     model.traverse((c) => {
       if (c.isMesh) {
@@ -963,7 +972,22 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     console.log('[Google 3D] modelo normalizado · base en z=' + finalBox.min.z.toFixed(3) + 'm (esperado 0)',
                 '· dims finales (x,y,z) =', finalDims.x.toFixed(1) + 'm', finalDims.y.toFixed(1) + 'm', finalDims.z.toFixed(1) + 'm',
                 '· visible=' + modelRoot.visible);
-  });
+  };
+
+  (async () => {
+    try {
+      const res = await fetch(modelUrl);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      let buf = await res.arrayBuffer();
+      buf = sanitizeGLB(buf) || buf;
+      const base = modelUrl.substring(0, modelUrl.lastIndexOf('/') + 1);
+      loader.parse(buf, base, onLoaded, (err) => {
+        console.error('[Google 3D] GLB parse failed:', err);
+      });
+    } catch (err) {
+      console.error('[Google 3D] no se pudo cargar el modelo:', err);
+    }
+  })();
 
   // Sliders. `format` overrides the default `value+unit` text in the value
   // span — used by Este/Norte to display "20.5 m E" or "20.5 m O" depending
