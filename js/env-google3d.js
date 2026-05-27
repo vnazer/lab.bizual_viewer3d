@@ -245,6 +245,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const panel = document.createElement('div');
   panel.id = 'g3d-panel';
   const sR = parseFloat(localStorage.getItem('bizual_g3d_rot')   || 0);
+  const sP = parseFloat(localStorage.getItem('bizual_g3d_pitch') || 0);
+  const sL = parseFloat(localStorage.getItem('bizual_g3d_roll')  || 0);
   // bizual_g3d_alt_v2 = ALTURA SOBRE EL SUELO (post ground-anchor). The old
   // bizual_g3d_alt key was metres above the WGS84 ellipsoid and is now
   // semantically wrong — ignore it so users don't inherit a stale +16 m offset.
@@ -253,6 +255,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sN = parseFloat(localStorage.getItem('bizual_g3d_offset_north') || 0);
   const sS = parseFloat(localStorage.getItem('bizual_g3d_scale') || 1);
   const sQ = parseFloat(localStorage.getItem('bizual_g3d_quality') || 10);
+
+  // Format helpers for slider display text.
+  const fmtEW = (v) => Math.abs(v).toFixed(1) + ' m ' + (v >= 0 ? 'E' : 'O');
+  const fmtNS = (v) => Math.abs(v).toFixed(1) + ' m ' + (v >= 0 ? 'N' : 'S');
   panel.innerHTML = `
     <div class="g3d-header">
       <div class="g3d-title">
@@ -268,34 +274,44 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     <canvas id="g3d-canvas"></canvas>
     <div class="g3d-bottom">
       <div class="g3d-sliders">
-        <label>🔄 Rot
+        <label title="Rotación alrededor del eje vertical (yaw). 0° = orientación original.">🔄 Rot
           <input type="range" id="g3d-rot"   min="0"   max="360" step="1"    value="${sR}">
           <span id="g3d-rot-val">${sR}°</span>
+        </label>
+        <label title="Inclinación adelante (+) / atrás (−) sobre el eje Este. Para ajustar si el modelo no calza perfecto perpendicular al terreno.">⤴️ Pitch
+          <input type="range" id="g3d-pitch" min="-15" max="15"  step="0.5"  value="${sP}">
+          <span id="g3d-pitch-val">${sP}°</span>
+        </label>
+        <label title="Inclinación lateral derecha (+) / izquierda (−) sobre el eje Norte.">🌀 Roll
+          <input type="range" id="g3d-roll"  min="-15" max="15"  step="0.5"  value="${sL}">
+          <span id="g3d-roll-val">${sL}°</span>
         </label>
         <label title="Metros sobre el suelo real (Maxar). Negativo = hundir el modelo">↕️ Altura
           <input type="range" id="g3d-alt"   min="-30" max="60"  step="0.5"  value="${sA}">
           <span id="g3d-alt-val">${sA} m</span>
         </label>
-        <label title="Mover el modelo en sentido este (+) / oeste (−) sobre el suelo">↔️ Este
+        <label title="Mover el modelo en sentido Este (+) / Oeste (−) sobre el suelo">↔️ E/O
           <input type="range" id="g3d-east"  min="-40" max="40"  step="0.5"  value="${sE}">
-          <span id="g3d-east-val">${sE} m</span>
+          <span id="g3d-east-val">${fmtEW(sE)}</span>
         </label>
-        <label title="Mover el modelo en sentido norte (+) / sur (−) sobre el suelo">⬆️ Norte
+        <label title="Mover el modelo en sentido Norte (+) / Sur (−) sobre el suelo">🧭 N/S
           <input type="range" id="g3d-north" min="-40" max="40"  step="0.5"  value="${sN}">
-          <span id="g3d-north-val">${sN} m</span>
+          <span id="g3d-north-val">${fmtNS(sN)}</span>
         </label>
         <label>📐 Escala
           <input type="range" id="g3d-scale" min="0.1" max="3"   step="0.05" value="${sS}">
           <span id="g3d-scale-val">${sS}×</span>
         </label>
-        <label title="errorTarget: menor = más detalle (más pesado), mayor = más liviano">🎯 Calidad
-          <input type="range" id="g3d-quality" min="6" max="24" step="1" value="${sQ}">
+        <label title="errorTarget: menor = más detalle (más pesado), mayor = más liviano. Usá los botones 📸/⚡ para presets.">🎯 Calidad
+          <input type="range" id="g3d-quality" min="2" max="24" step="1" value="${sQ}">
           <span id="g3d-quality-val">${sQ}</span>
         </label>
       </div>
       <div class="g3d-quality">
         <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
         <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
+        <button id="g3d-quality-photo" title="Calidad máxima para sacar fotos (errorTarget=4). Tarda más en cargar pero los tiles Maxar quedan ultra-nítidos a nivel calle.">📸 Foto</button>
+        <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido, suficiente para vista general.">⚡ Rápido</button>
         <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
         <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
         <button id="g3d-save">💾 Guardar ajustes</button>
@@ -523,7 +539,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   // ─── Model load + geo transform ─────────────────────────────────────────
   let modelRoot = null;
-  let rotDeg    = sR;
+  let rotDeg    = sR; // yaw around vertical (world up)
+  let pitchDeg  = sP; // tilt around east axis (model tips N/S)
+  let rollDeg   = sL; // tilt around north axis (model tips E/O)
   let altOffset = sA;
   let offsetE   = sE;
   let offsetN   = sN;
@@ -551,9 +569,16 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     } else {
       frame.copy(getLocalFrameMatrix(lat, lon, altOffset));
     }
-    const rotY = new THREE.Matrix4().makeRotationY(rotDeg * Math.PI / 180);
-    const sM = new THREE.Matrix4().makeScale(scaleMx, scaleMx, scaleMx);
-    modelRoot.matrix.copy(frame).multiply(rotY).multiply(sM);
+    // ENU axes after `frame`: local X = east, Y = north, Z = up. So:
+    //   yaw    = rotation around Z (world up)
+    //   pitch  = rotation around X (east axis) — model tilts N/S
+    //   roll   = rotation around Y (north axis) — model tilts E/O
+    // Apply scale → roll → pitch → yaw → frame (right-to-left multiplication).
+    const rotZ = new THREE.Matrix4().makeRotationZ(rotDeg   * Math.PI / 180);
+    const rotX = new THREE.Matrix4().makeRotationX(pitchDeg * Math.PI / 180);
+    const rotY = new THREE.Matrix4().makeRotationY(rollDeg  * Math.PI / 180);
+    const sM   = new THREE.Matrix4().makeScale(scaleMx, scaleMx, scaleMx);
+    modelRoot.matrix.copy(frame).multiply(rotZ).multiply(rotX).multiply(rotY).multiply(sM);
     modelRoot.matrixAutoUpdate = false;
     modelRoot.matrixWorldNeedsUpdate = true;
   }
@@ -769,35 +794,53 @@ export async function openGoogle3DPanel(coords, modelUrl) {
                 '· visible=' + modelRoot.visible);
   });
 
-  // Sliders
-  function bindSlider(id, valId, decimals, unit, onChange) {
+  // Sliders. `format` overrides the default `value+unit` text in the value
+  // span — used by Este/Norte to display "20.5 m E" or "20.5 m O" depending
+  // on the sign so the cardinal direction is unambiguous.
+  function bindSlider(id, valId, decimals, unit, onChange, format) {
     const inp = document.getElementById(id);
     const out = document.getElementById(valId);
     if (!inp) return;
     inp.addEventListener('input', (e) => {
       const v = parseFloat(e.target.value);
-      out.textContent = v.toFixed(decimals) + unit;
+      out.textContent = format ? format(v) : (v.toFixed(decimals) + unit);
       onChange(v);
       applyGeoTransform();
     });
   }
   bindSlider('g3d-rot',   'g3d-rot-val',   0, '°',  (v) => rotDeg = v);
+  bindSlider('g3d-pitch', 'g3d-pitch-val', 1, '°',  (v) => pitchDeg = v);
+  bindSlider('g3d-roll',  'g3d-roll-val',  1, '°',  (v) => rollDeg = v);
   bindSlider('g3d-alt',   'g3d-alt-val',   1, ' m', (v) => altOffset = v);
-  bindSlider('g3d-east',  'g3d-east-val',  1, ' m', (v) => offsetE = v);
-  bindSlider('g3d-north', 'g3d-north-val', 1, ' m', (v) => offsetN = v);
+  bindSlider('g3d-east',  'g3d-east-val',  1, ' m', (v) => offsetE = v, fmtEW);
+  bindSlider('g3d-north', 'g3d-north-val', 1, ' m', (v) => offsetN = v, fmtNS);
   bindSlider('g3d-scale', 'g3d-scale-val', 2, '×',  (v) => scaleMx = v);
 
   let qualityVal = sQ;
   const qInp = document.getElementById('g3d-quality');
   const qOut = document.getElementById('g3d-quality-val');
-  qInp.addEventListener('input', (e) => {
-    qualityVal = parseFloat(e.target.value);
-    qOut.textContent = String(qualityVal);
-    tiles.errorTarget = qualityVal;
+  function setQuality(v) {
+    qualityVal = v;
+    qInp.value = String(v);
+    qOut.textContent = String(v);
+    tiles.errorTarget = v;
+  }
+  qInp.addEventListener('input', (e) => setQuality(parseFloat(e.target.value)));
+  // Preset buttons. Photo = max detail (slower, sharper tiles at street
+  // level — best for screenshots). Fast = balanced for everyday inspection.
+  document.getElementById('g3d-quality-photo').addEventListener('click', () => {
+    setQuality(4);
+    console.log('[Google 3D] preset 📸 Foto: errorTarget=4');
+  });
+  document.getElementById('g3d-quality-fast').addEventListener('click', () => {
+    setQuality(14);
+    console.log('[Google 3D] preset ⚡ Rápido: errorTarget=14');
   });
 
   document.getElementById('g3d-save').addEventListener('click', () => {
     localStorage.setItem('bizual_g3d_rot',           String(rotDeg));
+    localStorage.setItem('bizual_g3d_pitch',         String(pitchDeg));
+    localStorage.setItem('bizual_g3d_roll',          String(rollDeg));
     localStorage.setItem('bizual_g3d_alt_v2',        String(altOffset));
     localStorage.setItem('bizual_g3d_offset_east',   String(offsetE));
     localStorage.setItem('bizual_g3d_offset_north',  String(offsetN));
