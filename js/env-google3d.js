@@ -337,11 +337,24 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return 8; // default: high-but-not-max
   })();
 
-  // Calidad slider (1-10) ↔ errorTarget (~22 to 1). Lower errorTarget loads
-  // finer tiles, so calidad=10 → errorTarget=1 (sharpest), calidad=1 →
-  // errorTarget=22 (lightest). Keep errorTarget bounded ≥1 to avoid the
-  // renderer thrashing on impossible targets.
-  const calidadToErrorTarget = (c) => Math.max(1, Math.round(25 - c * 2.4));
+  // Calidad slider (1-10) ↔ errorTarget. Lower errorTarget = denser Maxar
+  // tiles streamed. calidad=10 → 0.5 (ultra, near-native pixel density),
+  // calidad=1 → 22 (fast, basemap-ish). Floor at 0.5 because errorTarget=0
+  // makes the renderer thrash on tiles it can never satisfy.
+  const calidadToErrorTarget = (c) => {
+    if (c >= 10) return 0.5;
+    return Math.max(0.5, +(22.5 - c * 2.2).toFixed(1));
+  };
+  // Resolution scale (devicePixelRatio multiplier) follows quality so a
+  // Fast preset doesn't push 4× pixel-density tile requests to the GPU.
+  //   calidad 9-10  → native DPR (Retina-crisp)
+  //   calidad 4-8   → 1.0
+  //   calidad 1-3   → 0.75 (drastic fetch reduction; aliased but fast)
+  const calidadToPixelRatio = (c) => {
+    if (c >= 9) return window.devicePixelRatio || 1;
+    if (c >= 4) return 1;
+    return 0.75;
+  };
 
   // Format helpers for slider display text.
   const fmtEW = (v) => Math.abs(v).toFixed(1) + ' m ' + (v >= 0 ? 'E' : 'O');
@@ -875,16 +888,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   let _anchorTries = 0;
   let _refineTicks = 0;
+  // Elevation API returns orthometric (geoid-referenced) height while ECEF
+  // tiles live on the WGS84 ellipsoid. Geoid undulation in Chile is ~+30 m,
+  // so the API estimate can disagree with the actual Maxar mesh by tens of
+  // metres. We let raycast-against-loaded-mesh be the source of truth and
+  // keep refining for ~30 s even when the API gave us a starting anchor.
   const _anchorInterval = setInterval(() => {
     if (!_groundAnchor) {
-      if (tryAnchorGround()) {
-        // If the API gave the anchor, there's nothing to refine — it's
-        // already the real ground elevation. Stop polling immediately.
-        if (_apiElevation != null) {
-          clearInterval(_anchorInterval);
-        }
-        return;
-      }
+      if (tryAnchorGround()) return;
       _anchorTries++;
       if (_anchorTries % 6 === 0) {
         console.log('[Google 3D] raycast aún sin suelo · visibleTiles=' + (tiles.visibleTiles?.size || 0) +
@@ -1024,13 +1035,25 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   let qualityVal = sQ; // 1-10, where 10 = max detail
   const qInp = document.getElementById('g3d-quality');
   const qOut = document.getElementById('g3d-quality-val');
-  // Apply initial errorTarget from saved calidad (sQ).
+  // Apply initial errorTarget + matching renderer pixel ratio so tile fetches
+  // line up with what the GPU will actually rasterise.
   tiles.errorTarget = calidadToErrorTarget(sQ);
+  renderer.setPixelRatio(calidadToPixelRatio(sQ));
   function setQuality(calidad) {
     qualityVal = Math.max(1, Math.min(10, calidad));
     qInp.value = String(qualityVal);
     qOut.textContent = qualityVal + '/10';
     tiles.errorTarget = calidadToErrorTarget(qualityVal);
+    // Pixel ratio drives both render cost and the screen-space-error budget
+    // the tiles renderer uses (setResolutionFromRenderer multiplies by it).
+    // Changing it live re-targets which Maxar LODs get fetched on next frame.
+    const newDpr = calidadToPixelRatio(qualityVal);
+    if (renderer.getPixelRatio() !== newDpr) {
+      renderer.setPixelRatio(newDpr);
+      const W = Math.max(8, canvas.clientWidth);
+      const H = Math.max(8, canvas.clientHeight);
+      renderer.setSize(W, H, false);
+    }
   }
   qInp.addEventListener('input', (e) => setQuality(parseFloat(e.target.value)));
   // Preset buttons. Photo = max detail (slowest load, sharpest tiles at
