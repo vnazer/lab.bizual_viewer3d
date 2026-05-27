@@ -606,16 +606,16 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _groundAnchor = r.hit;
     applyGeoTransform();
     if (modelRoot) modelRoot.visible = true;
-    // Oblique pedestrian-scale framing: ~150 m east + 80 m up, looking at the
-    // building's mid-height. Much better than the previous top-down 220 m
-    // view which made the model look tiny against far terrain.
-    const lookAt = _groundAnchor.clone().addScaledVector(_up, 15);
-    controls.target.copy(lookAt);
-    animateCameraTo(
-      camera, controls,
-      _groundAnchor.clone().addScaledVector(_east, 150).addScaledVector(_up, 80),
-      lookAt, 1400
-    );
+    // Centre the orbit on the model but DO NOT tween the camera up to the
+    // anchor. The initial anchor often lands on a coarse global-terrain tile
+    // (e.g. Macul reads ~1071 m when the global dataset smoothed nearby
+    // Cordillera into the airspace). Tweening the camera up to that altitude
+    // takes it far from Maxar's effective LOD range, so Maxar never refines
+    // and the view stays blurry → no way for the refinement loop to find
+    // real ground. Keep the camera at its initial 800 m altitude where Maxar
+    // does refine; the refinement loop below brings the anchor (and orbit
+    // target) down to the real ground over the next few seconds.
+    controls.target.copy(_groundAnchor.clone().addScaledVector(_up, 15));
     console.log('[Google 3D] ✅ modelo anclado',
                 '· suelo (min) ≈ ' + r.elev.toFixed(1) + 'm sobre elipsoide',
                 '· techos (max) ≈ ' + r.max.toFixed(1) + 'm',
@@ -625,29 +625,31 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return true;
   }
 
-  // Refinement pass: once anchored, keep re-sampling for the next ~30 s. If
-  // Maxar HD tiles land where the initial raycast only saw the coarse global
-  // basemap (spread ≈ 0.5 m → real Maxar with buildings → spread 10-30 m),
-  // re-anchor to the new lowest hit so the model isn't permanently stuck at
-  // the basemap's smoothed elevation. Camera + controls.target pan with the
-  // delta so framing stays consistent without a jarring re-tween.
+  // Refinement pass: once anchored, keep re-sampling for the next ~30 s.
+  // BIDIRECTIONAL — Maxar tiles can land above the initial hit (basemap was
+  // the smooth ellipsoid sphere, Maxar adds buildings on top) OR below it
+  // (global-terrain dataset smoothed nearby Cordillera into Macul's
+  // airspace, real Maxar street is hundreds of metres lower). We just track
+  // the latest lowest hit, with safety caps.
   function refineAnchorGround() {
     if (!_groundAnchor) return false;
     const r = sampleGround();
     if (!r || Math.abs(r.elev) < 5) return false;
-    const ellipsoidR = latLonToECEF(lat, lon, 0).length();
+    const ellipsoidR = _targetSurface.length();
     const currentElev = _groundAnchor.length() - ellipsoidR;
     const delta = r.elev - currentElev;
-    // Only refine when the new lowest hit is meaningfully higher (Maxar
-    // refining above the basemap). Ignore tiny jitter and downward jumps.
-    if (delta < 1 || delta > 200) return false;
+    if (Math.abs(delta) < 5) return false;     // no meaningful change
+    if (Math.abs(delta) > 1000) return false;  // bizarre jump, ignore
     const shift = r.hit.clone().sub(_groundAnchor);
     _groundAnchor = r.hit;
     applyGeoTransform();
-    camera.position.add(shift);
+    // Pan the orbit target with the model so the camera keeps it framed.
+    // Don't move the camera position — staying put gives the tiles renderer
+    // a stable viewpoint to keep refining Maxar around the real ground.
     controls.target.add(shift);
     console.log('[Google 3D] anchor refinado: ' + currentElev.toFixed(1) + 'm → ' + r.elev.toFixed(1) +
-                'm (Δ=+' + delta.toFixed(1) + 'm) · spread=' + (r.max - r.elev).toFixed(1) + 'm');
+                'm (Δ=' + (delta >= 0 ? '+' : '') + delta.toFixed(1) + 'm)' +
+                ' · spread=' + (r.max - r.elev).toFixed(1) + 'm');
     return true;
   }
 
