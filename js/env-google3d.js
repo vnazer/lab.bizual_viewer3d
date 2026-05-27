@@ -309,6 +309,11 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       </div>
     </div>
     <canvas id="g3d-canvas"></canvas>
+    <div id="g3d-sv-overlay" style="display:none;position:absolute;top:48px;left:0;right:0;bottom:88px;z-index:50;background:#000">
+      <iframe id="g3d-sv-iframe" allowfullscreen style="width:100%;height:100%;border:0;display:block"></iframe>
+      <button id="g3d-sv-close" title="Cerrar Street View (Esc)"
+              style="position:absolute;top:8px;right:8px;z-index:51;background:rgba(0,0,0,0.7);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:4px;padding:6px 12px;cursor:pointer;font-size:13px;">✕ Cerrar</button>
+    </div>
     <div class="g3d-bottom">
       <div class="g3d-sliders">
         <label title="Rotación alrededor del eje vertical (yaw). 0° = orientación original.">🔄 Rot
@@ -347,8 +352,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       <div class="g3d-quality">
         <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
         <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
-        <button id="g3d-quality-photo" title="Calidad máxima para sacar fotos (errorTarget=4). Tarda más en cargar pero los tiles Maxar quedan ultra-nítidos a nivel calle.">📸 Foto</button>
-        <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido, suficiente para vista general.">⚡ Rápido</button>
+        <button id="g3d-view-sv" title="Street View real de Google en estas coordenadas. El modelo 3D no aparece encima (es una vista alternativa para ver el lugar real).">🌆 Street View</button>
+        <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
+        <button id="g3d-quality-photo" title="Sube la calidad de tiles al máximo (errorTarget=4) para que se vean ultra-nítidos. Tarda más en cargar pero ideal antes de capturar.">📸 Calidad</button>
+        <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido.">⚡ Rápido</button>
         <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
         <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
         <button id="g3d-save">💾 Guardar ajustes</button>
@@ -363,7 +370,17 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const k = (prompt('Google Maps API key:', getGoogleApiKey()) || '').trim();
     if (k) { saveGoogleApiKey(k); closeGoogle3DPanel(); openGoogle3DPanel(coords, modelUrl); }
   });
-  const escHandler = (e) => { if (e.key === 'Escape') closeGoogle3DPanel(); };
+  const escHandler = (e) => {
+    if (e.key !== 'Escape') return;
+    // If the Street View overlay is open, Esc closes it first instead of
+    // dismissing the whole panel.
+    const sv = document.getElementById('g3d-sv-overlay');
+    if (sv && sv.style.display === 'block') {
+      document.getElementById('g3d-sv-close')?.click();
+      return;
+    }
+    closeGoogle3DPanel();
+  };
   document.addEventListener('keydown', escHandler);
   panel._escHandler = escHandler;
 
@@ -375,8 +392,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     // ruins a linear 24-bit depth buffer (sub-metre fights mid-frame). Log
     // depth keeps every Maxar tile crisp from street level up to orbit.
     logarithmicDepthBuffer: true,
+    // Required so canvas.toBlob() / toDataURL() can read the rendered frame
+    // for the 📷 Capturar screenshot button.
+    preserveDrawingBuffer: true,
   });
   renderer.setPixelRatio(window.devicePixelRatio);
+  // Cache max anisotropy once; used per-tile below to sharpen textures at
+  // oblique angles (street level, façade close-ups).
+  const _maxAniso = renderer.capabilities.getMaxAnisotropy();
   renderer.toneMapping = THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.95;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -496,7 +519,23 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     if (/429/.test(status)) console.error('[Google 3D] → 429: rate limit / cuota excedida');
   });
   tiles.addEventListener('load-content', (e) => {
-    console.log('[Google 3D] tile content loaded:', e?.tile?.content?.uri || e);
+    // Apply maximum anisotropic filtering to every Maxar tile texture as it
+    // arrives. Without this, textures viewed at oblique angles (street view
+    // looking at façades, distant rooftops) pixelate severely. This is the
+    // single biggest visual quality boost we can do client-side.
+    const tileScene = e?.scene || e?.tile?.cached?.scene;
+    if (tileScene && tileScene.traverse) {
+      tileScene.traverse((obj) => {
+        if (!obj.isMesh || !obj.material) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+          if (m.map && m.map.anisotropy !== _maxAniso) {
+            m.map.anisotropy = _maxAniso;
+            m.map.needsUpdate = true;
+          }
+        }
+      });
+    }
   });
 
   // Periodic stats — uses the actual property names from 0.4.7.
@@ -932,6 +971,52 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const lookAt = base.clone().addScaledVector(_up, 15);
     controls.target.copy(lookAt);
     animateCameraTo(camera, controls, eyePos, lookAt, 1200);
+  });
+
+  // Street View overlay. Embeds Google's panoramic photographic Street View
+  // at the model's lat/lon via the Maps Embed API (different from Map Tiles,
+  // needs "Maps Embed API" enabled on the key). The 3D model is hidden while
+  // the overlay is up — overlaying the model on top of Street View requires
+  // syncing two cameras (Three.js + StreetViewPanorama) and is a separate
+  // project. For now the user can toggle between views.
+  const svOverlay = document.getElementById('g3d-sv-overlay');
+  const svIframe  = document.getElementById('g3d-sv-iframe');
+  function openStreetView() {
+    const url = 'https://www.google.com/maps/embed/v1/streetview'
+      + '?key=' + encodeURIComponent(apiKey)
+      + '&location=' + lat + ',' + lon
+      + '&heading=0&pitch=0&fov=90';
+    svIframe.src = url;
+    svOverlay.style.display = 'block';
+  }
+  function closeStreetView() {
+    svOverlay.style.display = 'none';
+    svIframe.src = 'about:blank';
+  }
+  document.getElementById('g3d-view-sv').addEventListener('click', openStreetView);
+  document.getElementById('g3d-sv-close').addEventListener('click', closeStreetView);
+
+  // Screenshot of the current 3D view. Saves a PNG with the lat/lon and
+  // timestamp in the filename so multiple captures don't overwrite.
+  document.getElementById('g3d-capture').addEventListener('click', () => {
+    // Force one render so the back buffer matches what's on screen exactly.
+    renderer.render(scene, camera);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        alert('No se pudo capturar la imagen — recargá la página y reintentá.');
+        return;
+      }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'bizual-3d-' + lat.toFixed(4) + '_' + lon.toFixed(4) + '-' + stamp + '.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      console.log('[Google 3D] 📷 captura descargada:', a.download, '(' + (blob.size/1024).toFixed(0) + ' KB)');
+    }, 'image/png');
   });
 
   // ─── Animation loop ─────────────────────────────────────────────────────
