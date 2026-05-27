@@ -249,8 +249,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // bizual_g3d_alt key was metres above the WGS84 ellipsoid and is now
   // semantically wrong — ignore it so users don't inherit a stale +16 m offset.
   const sA = parseFloat(localStorage.getItem('bizual_g3d_alt_v2') || 0);
+  const sE = parseFloat(localStorage.getItem('bizual_g3d_offset_east')  || 0);
+  const sN = parseFloat(localStorage.getItem('bizual_g3d_offset_north') || 0);
   const sS = parseFloat(localStorage.getItem('bizual_g3d_scale') || 1);
-  const sQ = parseFloat(localStorage.getItem('bizual_g3d_quality') || 14);
+  const sQ = parseFloat(localStorage.getItem('bizual_g3d_quality') || 10);
   panel.innerHTML = `
     <div class="g3d-header">
       <div class="g3d-title">
@@ -274,16 +276,26 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           <input type="range" id="g3d-alt"   min="-30" max="60"  step="0.5"  value="${sA}">
           <span id="g3d-alt-val">${sA} m</span>
         </label>
+        <label title="Mover el modelo en sentido este (+) / oeste (−) sobre el suelo">↔️ Este
+          <input type="range" id="g3d-east"  min="-40" max="40"  step="0.5"  value="${sE}">
+          <span id="g3d-east-val">${sE} m</span>
+        </label>
+        <label title="Mover el modelo en sentido norte (+) / sur (−) sobre el suelo">⬆️ Norte
+          <input type="range" id="g3d-north" min="-40" max="40"  step="0.5"  value="${sN}">
+          <span id="g3d-north-val">${sN} m</span>
+        </label>
         <label>📐 Escala
           <input type="range" id="g3d-scale" min="0.1" max="3"   step="0.05" value="${sS}">
           <span id="g3d-scale-val">${sS}×</span>
         </label>
         <label title="errorTarget: menor = más detalle (más pesado), mayor = más liviano">🎯 Calidad
-          <input type="range" id="g3d-quality" min="8" max="24" step="1" value="${sQ}">
+          <input type="range" id="g3d-quality" min="6" max="24" step="1" value="${sQ}">
           <span id="g3d-quality-val">${sQ}</span>
         </label>
       </div>
       <div class="g3d-quality">
+        <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
+        <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
         <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
         <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
         <button id="g3d-save">💾 Guardar ajustes</button>
@@ -378,10 +390,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // more detail (heavier), higher = lighter. Cache + queue sizes are bounded so
   // a long session doesn't saturate memory or the network.
   tiles.errorTarget = sQ;
-  tiles.lruCache.minSize = 600;
-  tiles.lruCache.maxSize = 900;
-  tiles.downloadQueue.maxJobs = 10;
-  tiles.parseQueue.maxJobs = 5;
+  // Larger cache + more parallel jobs so the user can orbit close to the
+  // model without Maxar tiles being evicted/re-downloaded every move.
+  tiles.lruCache.minSize = 1000;
+  tiles.lruCache.maxSize = 1800;
+  tiles.downloadQueue.maxJobs = 16;
+  tiles.parseQueue.maxJobs = 8;
 
   tiles.setCamera(camera);
   tiles.setResolutionFromRenderer(camera, renderer);
@@ -449,7 +463,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // OrbitControls — orbit around the building's surface point
   const controls = new OrbitControls(camera, canvas);
   controls.target.copy(latLonToECEF(lat, lon, 0));
-  controls.minDistance = 100;
+  // Let the user scroll-zoom right up to the model (3 m) or all the way out
+  // to space; previously the 100 m floor blocked street-level inspection.
+  controls.minDistance = 3;
   controls.maxDistance = 5_000_000;
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
@@ -509,6 +525,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   let modelRoot = null;
   let rotDeg    = sR;
   let altOffset = sA;
+  let offsetE   = sE;
+  let offsetN   = sN;
   let scaleMx   = sS;
 
   // Local up (ellipsoid normal) at the target, and the ECEF point where the
@@ -523,9 +541,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     if (!modelRoot) return;
     const frame = new THREE.Matrix4();
     if (_groundAnchor) {
-      // Keep the ENU orientation, but sit on the real terrain + altura offset.
+      // Keep the ENU orientation, but sit on the real terrain + altura offset
+      // and shift east/north for precise placement on the lot.
       WGS84_ELLIPSOID.getEastNorthUpFrame(lat * DEG2RAD, lon * DEG2RAD, frame);
-      frame.setPosition(_groundAnchor.clone().addScaledVector(_up, altOffset));
+      frame.setPosition(_groundAnchor.clone()
+        .addScaledVector(_up,    altOffset)
+        .addScaledVector(_east,  offsetE)
+        .addScaledVector(_north, offsetN));
     } else {
       frame.copy(getLocalFrameMatrix(lat, lon, altOffset));
     }
@@ -761,6 +783,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   }
   bindSlider('g3d-rot',   'g3d-rot-val',   0, '°',  (v) => rotDeg = v);
   bindSlider('g3d-alt',   'g3d-alt-val',   1, ' m', (v) => altOffset = v);
+  bindSlider('g3d-east',  'g3d-east-val',  1, ' m', (v) => offsetE = v);
+  bindSlider('g3d-north', 'g3d-north-val', 1, ' m', (v) => offsetN = v);
   bindSlider('g3d-scale', 'g3d-scale-val', 2, '×',  (v) => scaleMx = v);
 
   let qualityVal = sQ;
@@ -773,13 +797,48 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   });
 
   document.getElementById('g3d-save').addEventListener('click', () => {
-    localStorage.setItem('bizual_g3d_rot',      String(rotDeg));
-    localStorage.setItem('bizual_g3d_alt_v2',   String(altOffset));
-    localStorage.setItem('bizual_g3d_scale',    String(scaleMx));
-    localStorage.setItem('bizual_g3d_quality',  String(qualityVal));
+    localStorage.setItem('bizual_g3d_rot',           String(rotDeg));
+    localStorage.setItem('bizual_g3d_alt_v2',        String(altOffset));
+    localStorage.setItem('bizual_g3d_offset_east',   String(offsetE));
+    localStorage.setItem('bizual_g3d_offset_north',  String(offsetN));
+    localStorage.setItem('bizual_g3d_scale',         String(scaleMx));
+    localStorage.setItem('bizual_g3d_quality',       String(qualityVal));
     const btn = document.getElementById('g3d-save');
     btn.textContent = '✅ Guardado';
     setTimeout(() => { btn.textContent = '💾 Guardar ajustes'; }, 1500);
+  });
+
+  // ─── Camera view presets ────────────────────────────────────────────────
+  // Position camera relative to the (offset-adjusted) model base in ENU
+  // axes, looking up at the building. Re-reads the model position each
+  // click so it follows wherever the user moved the model with the offset
+  // sliders.
+  function modelBaseWorld() {
+    if (!_groundAnchor) return latLonToECEF(lat, lon, 0);
+    return _groundAnchor.clone()
+      .addScaledVector(_up,    altOffset)
+      .addScaledVector(_east,  offsetE)
+      .addScaledVector(_north, offsetN);
+  }
+  document.getElementById('g3d-view-street').addEventListener('click', () => {
+    const base = modelBaseWorld();
+    // Stand 35 m south of the building at eye level (1.65 m), looking at
+    // the lower third (~9 m up) so the façade fills the frame.
+    const eyePos = base.clone()
+      .addScaledVector(_north, -35)
+      .addScaledVector(_up,    1.65);
+    const lookAt = base.clone().addScaledVector(_up, 9);
+    controls.target.copy(lookAt);
+    animateCameraTo(camera, controls, eyePos, lookAt, 1200);
+  });
+  document.getElementById('g3d-view-aerial').addEventListener('click', () => {
+    const base = modelBaseWorld();
+    const eyePos = base.clone()
+      .addScaledVector(_east, 150)
+      .addScaledVector(_up,   80);
+    const lookAt = base.clone().addScaledVector(_up, 15);
+    controls.target.copy(lookAt);
+    animateCameraTo(camera, controls, eyePos, lookAt, 1200);
   });
 
   // ─── Animation loop ─────────────────────────────────────────────────────
