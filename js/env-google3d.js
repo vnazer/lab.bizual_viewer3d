@@ -226,6 +226,7 @@ function showPreflightError(detail) {
 // ─── Main panel ───────────────────────────────────────────────────────────
 export async function openGoogle3DPanel(coords, modelUrl) {
   const { lat, lon, display } = coords;
+  console.log('[Google 3D] abriendo panel · lat=' + lat + ' · lon=' + lon + ' · display="' + display + '"');
   const apiKey = getGoogleApiKey();
   if (!apiKey) { openApiKeyDialog(coords, modelUrl); return; }
 
@@ -549,29 +550,48 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // hit (= street level, not rooftops) plus stats on the spread. Shared
   // between the initial anchor and the refinement pass that runs as Maxar
   // tiles arrive at higher LOD.
+  // Horizontal-distance filter: a hit further than 300 m from the target
+  // (measured perpendicular to local up) is geometry from somewhere else
+  // (e.g. a Cordillera tile whose bounding volume happened to cover the
+  // ray's airspace). Rejecting these stopped the anchor locking at ~5400 m
+  // because the raycast was grabbing a far-away mountain mesh.
+  const _targetSurface = latLonToECEF(lat, lon, 0);
+  const _tmpOffset = new THREE.Vector3();
   function sampleGround() {
-    const baseOrigin = latLonToECEF(lat, lon, 15000);
-    const ellipsoidR = latLonToECEF(lat, lon, 0).length();
+    const baseOrigin = latLonToECEF(lat, lon, 2500);
+    const ellipsoidR = _targetSurface.length();
     const dir = _up.clone().negate();
     const elevs = [];
     let bestHit = null;
     let bestElev = Infinity;
+    let rejectedFar = 0;
     for (const dE of [-100, -50, 0, 50, 100]) {
       for (const dN of [-100, -50, 0, 50, 100]) {
         const origin = baseOrigin.clone().addScaledVector(_east, dE).addScaledVector(_north, dN);
         _groundRay.set(origin, dir);
-        _groundRay.far = 25000;
+        _groundRay.far = 12000;
         const hits = _groundRay.intersectObject(tiles.group, false);
         if (!hits.length) continue;
         const elev = hits[0].point.length() - ellipsoidR;
         if (elev < -500 || elev > 9000) continue;
+        // Horizontal distance from target: project the (hit - targetSurface)
+        // vector onto the plane perpendicular to local up.
+        _tmpOffset.copy(hits[0].point).sub(_targetSurface);
+        const vertical = _tmpOffset.dot(_up);
+        _tmpOffset.addScaledVector(_up, -vertical);
+        if (_tmpOffset.length() > 300) { rejectedFar++; continue; }
         elevs.push(elev);
         if (elev < bestElev) { bestElev = elev; bestHit = hits[0].point.clone(); }
       }
     }
-    if (!bestHit) return null;
+    if (!bestHit) {
+      if (rejectedFar > 0) {
+        console.log('[Google 3D] ' + rejectedFar + ' hits descartados por distancia horizontal (>300m del target — tile espurio)');
+      }
+      return null;
+    }
     elevs.sort((a, b) => a - b);
-    return { hit: bestHit, elev: bestElev, max: elevs[elevs.length - 1], count: elevs.length };
+    return { hit: bestHit, elev: bestElev, max: elevs[elevs.length - 1], count: elevs.length, rejected: rejectedFar };
   }
 
   function tryAnchorGround() {
@@ -600,6 +620,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
                 '· suelo (min) ≈ ' + r.elev.toFixed(1) + 'm sobre elipsoide',
                 '· techos (max) ≈ ' + r.max.toFixed(1) + 'm',
                 '· hits válidos=' + r.count + '/25',
+                '· descartados (lejos)=' + r.rejected,
                 '· spread=' + (r.max - r.elev).toFixed(1) + 'm');
     return true;
   }
