@@ -747,7 +747,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         _tmpOffset.copy(hits[0].point).sub(_targetSurface);
         const vertical = _tmpOffset.dot(_up);
         _tmpOffset.addScaledVector(_up, -vertical);
-        if (_tmpOffset.length() > 300) { rejectedFar++; continue; }
+        if (_tmpOffset.length() > 200) { rejectedFar++; continue; }
         elevs.push(elev);
         if (elev < bestElev) { bestElev = elev; bestHit = hits[0].point.clone(); }
       }
@@ -824,7 +824,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const currentElev = _groundAnchor.length() - ellipsoidR;
     const delta = r.elev - currentElev;
     if (Math.abs(delta) < 5) return false;     // no meaningful change
-    if (Math.abs(delta) > 1000) return false;  // bizarre jump, ignore
+    // Cap at 200 m: bigger deltas are the raycast grabbing a far Cordillera
+    // tile whose bbox slipped into the rays. The previous 1000 m cap let
+    // through a +943 m jump that dragged the orbit target above the camera
+    // and Maxar stopped refining around the model.
+    if (Math.abs(delta) > 200) {
+      console.log('[Google 3D] refinamiento rechazado · delta=' + delta.toFixed(1) + 'm (>200m, probable tile espurio)');
+      return false;
+    }
     const shift = r.hit.clone().sub(_groundAnchor);
     _groundAnchor = r.hit;
     applyGeoTransform();
