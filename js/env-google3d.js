@@ -664,6 +664,15 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   renderer.toneMapping         = TONEMAP_MAP[_labTonemapId] ?? THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = _labExposure;
   renderer.outputColorSpace    = THREE.SRGBColorSpace;
+
+  // Day/night dims the WHOLE scene — Maxar tiles, terrain, and model alike —
+  // through tone-map exposure, the only lever that touches the tiles' baked
+  // daylight texture (lights/IBL only reach the model). _userExpo is the
+  // daytime base set by the Expo slider; _expoMul is the 0..1 day/night factor
+  // written by applyG3dSunHour. Final exposure = base × day/night.
+  let _userExpo = _labExposure;
+  let _expoMul  = 1;
+  const _applyExposure = () => { renderer.toneMappingExposure = _userExpo * _expoMul; };
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   _activeRenderer = renderer;
@@ -792,11 +801,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // the panel shows the value that's already in effect.
   const expoInp = document.getElementById('g3d-expo');
   const expoOut = document.getElementById('g3d-expo-val');
-  expoInp.value = String(renderer.toneMappingExposure || 1.15);
+  expoInp.value = String(_userExpo || 1.15);
   expoOut.textContent = parseFloat(expoInp.value).toFixed(2);
   expoInp.addEventListener('input', (e) => {
     const v = parseFloat(e.target.value);
-    renderer.toneMappingExposure = v;
+    _userExpo = v;          // daytime base; day/night re-applies on top
+    _applyExposure();
     expoOut.textContent = v.toFixed(2);
   });
   const contInp = document.getElementById('g3d-contrast');
@@ -1084,14 +1094,20 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     // 0 at/below the horizon → 1 at high sun. The single "how bright is it" term.
     const day  = THREE.MathUtils.clamp((p.elevation + 6) / 50, 0, 1);
     const dayS = day * day * (3 - 2 * day);            // smoothstep
+    // Global day/night brightness for the WHOLE scene (Maxar tiles, terrain and
+    // model) via tone-map exposure — the only lever that dims the tiles' baked
+    // daylight, so the building and its surroundings darken together. A gentle
+    // linear ramp on sun height; floor at 0.22 so deep night isn't pure black.
+    _expoMul = 0.22 + 0.78 * THREE.MathUtils.clamp((p.elevation + 10) / 60, 0, 1);
+    _applyExposure();
     // Hemisphere fill: faint cool moon-fill at night, full sky bounce by day.
-    hemiLight.intensity = 0.05 + 0.45 * dayS;
+    hemiLight.intensity = 0.12 + 0.4 * dayS;
     hemiLight.color.copy(_hemiNight).lerp(_hemiDay, dayS);
-    // Global IBL dimmer. Clamp ≤1 so midday keeps the calibrated white-wall
-    // exposure (see the envMapIntensity-clamp fix); floor at 0.05 so night
-    // isn't pure black. No-op on three builds without environmentIntensity.
+    // Global IBL dimmer on the model. Clamp ≤1 so midday keeps the calibrated
+    // white-wall exposure (see the envMapIntensity-clamp fix); floor at 0.15 so
+    // night reads as a dark building, not a black void next to the dimmed city.
     if ('environmentIntensity' in scene)
-      scene.environmentIntensity = THREE.MathUtils.clamp(p.envIntensity, 0.05, 1);
+      scene.environmentIntensity = THREE.MathUtils.clamp(p.envIntensity, 0.15, 1);
     // Sky dome: lerp night→day, then warm the lower band during golden hour.
     skySphere.material.uniforms.topColor.value.copy(_skyNgtTop).lerp(_skyDayTop, dayS);
     skySphere.material.uniforms.bottomColor.value.copy(_skyNgtBot).lerp(_skyDayBot, dayS);
