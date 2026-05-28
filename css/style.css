@@ -824,7 +824,11 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   color: rgba(255, 255, 255, 0.8);
   font-size: 16px;
   cursor: pointer;
+  transition: right 180ms ease;
 }
+/* When the panel is open, sit to its left so it never overlaps the first
+   section header. Panel is 296px wide + 8px gap + 8px margin = 312px. */
+#g3d-side-toggle.g3d-side-toggle-active { right: 312px; }
 #g3d-side-toggle:hover { background: rgba(40, 70, 150, 0.7); }
 .g3d-sec {
   background: rgba(255, 255, 255, 0.03);

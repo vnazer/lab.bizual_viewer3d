@@ -546,7 +546,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
             <span id="g3d-glass-reflect-val">${_glassState.reflect.toFixed(2)}</span>
           </label>
           <label title="Nitidez del vidrio. Bajo = espejo nítido (titila con env de alta frecuencia). Alto = mate/difuso (estable).">Nitidez
-            <input type="range" id="g3d-glass-rough" min="0.05" max="1" step="0.01" value="${_glassState.rough}">
+            <input type="range" id="g3d-glass-rough" min="0.18" max="1" step="0.01" value="${_glassState.rough}">
             <span id="g3d-glass-rough-val">${_glassState.rough.toFixed(2)}</span>
           </label>
           <label title="Transparencia del vidrio. 1 = opaco, 0 = totalmente transparente.">Opacidad
@@ -766,12 +766,17 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const inp = document.getElementById(id);
     const out = document.getElementById(valId);
     if (!inp || !out) return;
+    // input → live retune (in-memory, cheap). change → persist once on
+    // release (localStorage.setItem is synchronous/blocking, don't fire it
+    // on every drag tick).
     inp.addEventListener('input', (e) => {
       const v = parseFloat(e.target.value);
       _glassState[key] = v;
       out.textContent = v.toFixed(decimals);
       applyGlassState();
-      localStorage.setItem('bizual_g3d_glass_' + key, String(v));
+    });
+    inp.addEventListener('change', (e) => {
+      localStorage.setItem('bizual_g3d_glass_' + key, String(parseFloat(e.target.value)));
     });
   }
   bindGlassSlider('g3d-glass-reflect', 'g3d-glass-reflect-val', 'reflect');
@@ -782,8 +787,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sideToggle = document.getElementById('g3d-side-toggle');
   const sidePanel = document.getElementById('g3d-side');
   if (sideToggle && sidePanel) {
+    // Start with the toggle sitting to the LEFT of the open panel.
+    sideToggle.classList.add('g3d-side-toggle-active');
     sideToggle.addEventListener('click', () => {
-      sidePanel.classList.toggle('g3d-side-hidden');
+      const hidden = sidePanel.classList.toggle('g3d-side-hidden');
+      // When the panel is hidden the toggle slides back to the edge.
+      sideToggle.classList.toggle('g3d-side-toggle-active', !hidden);
     });
   }
 
@@ -1004,17 +1013,6 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   // ─── Model load + geo transform ─────────────────────────────────────────
   let modelRoot = null;
-  // Glass materials collected at load time so the "Vidrios" controls can
-  // retune them live. _glassState holds the current slider values.
-  const _glassMats = [];
-  const _glassState = {
-    reflect: parseFloat(localStorage.getItem('bizual_g3d_glass_reflect') ?? '0.15'),
-    rough:   parseFloat(localStorage.getItem('bizual_g3d_glass_rough')   ?? '0.30'),
-    opacity: parseFloat(localStorage.getItem('bizual_g3d_glass_opacity') ?? '0.55'),
-  };
-  function applyGlassState() {
-    for (const m of _glassMats) applyGlassSettings(m, _glassState);
-  }
   let rotDeg    = sR; // yaw around vertical (world up)
   let pitchDeg  = sP; // tilt around east axis (model tips N/S)
   let rollDeg   = sL; // tilt around north axis (model tips E/O)
