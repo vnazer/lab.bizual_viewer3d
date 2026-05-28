@@ -22,6 +22,7 @@ import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
 import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
+import { mountCaptureEngine } from './capture-engine.js?v=20260528a';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
@@ -180,6 +181,7 @@ export function closeGoogle3DPanel() {
     if (_activeTiles._anchorWatch)     clearInterval(_activeTiles._anchorWatch);
     if (_activeTiles._reAnchorTimer)   clearInterval(_activeTiles._reAnchorTimer);
     if (_activeTiles._envBakeTimer)    clearInterval(_activeTiles._envBakeTimer);
+    if (_activeTiles._cineCleanup) { try { _activeTiles._cineCleanup(); } catch {} }
     if (_activeTiles._envCleanup) { try { _activeTiles._envCleanup(); } catch {} }
     if (_activeTiles._postfx)     { try { _activeTiles._postfx.dispose(); } catch {} }
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
@@ -2026,12 +2028,18 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   });
 
   // ─── Animation loop ─────────────────────────────────────────────────────
+  let _cine = null; // Cinematic Capture & Animation Engine (mounted below).
   function animate() {
     _animFrame = requestAnimationFrame(animate);
     // Skip work entirely when the canvas is squished (e.g. the user dragged
     // DevTools so far up that the viewport collapses) — gl.viewport with a
     // ~0 dimension floods the WebGL context with errors and breaks rendering.
     if (canvas.clientWidth < 8 || canvas.clientHeight < 8) return;
+
+    // During headless capture the engine owns the frame end-to-end (camera,
+    // tiles streaming and render are driven deterministically by
+    // captureSequence) — decouple this loop entirely so it can't interfere.
+    if (_cine && _cine.isCapturing()) return;
 
     // Day-night playback: advance the simulated hour by real elapsed time.
     if (_sunPlaying) {
@@ -2042,7 +2050,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       }
       _sunClock = now;
     }
-    controls.update();
+    // Cinematic preview (Modo Presentación) drives the camera directly; when it
+    // does, skip controls.update() so OrbitControls' damping doesn't fight it.
+    const _camDriven = _cine ? _cine.tickPreview(performance.now()) : false;
+    if (!_camDriven) controls.update();
     // Per-frame LOD pipeline for Google Photorealistic 3D Tiles.
     //   setCamera + setResolutionFromRenderer feed the renderer the active
     //     camera matrix and the canvas size in CSS pixels — that's what
@@ -2076,6 +2087,69 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _postfx?.resize();
   });
   _resizeObs.observe(canvas);
+
+  // ─── Cinematic Capture & Animation Engine ─────────────────────────────────
+  // Building height (m) along the local up axis — feeds the preset auto-radius.
+  const buildingHeightM = () => {
+    const b = window.__g3dModel?.box;
+    if (!b) return 60;
+    let lo = Infinity, hi = -Infinity;
+    for (let xi = 0; xi < 2; xi++) for (let yi = 0; yi < 2; yi++) for (let zi = 0; zi < 2; zi++) {
+      const d = (xi ? b.max.x : b.min.x) * _up.x
+              + (yi ? b.max.y : b.min.y) * _up.y
+              + (zi ? b.max.z : b.min.z) * _up.z;
+      if (d < lo) lo = d;
+      if (d > hi) hi = d;
+    }
+    return Math.max(8, hi - lo);
+  };
+  let _capPrevPR = renderer.getPixelRatio();
+  _cine = mountCaptureEngine({
+    THREE, camera, controls, renderer, scene, canvas, tiles,
+    hudParent: document.getElementById('g3d-side'),
+    panelRoot: document.getElementById('g3d-panel'),
+    getFrame: () => _groundAnchor
+      ? { anchor: _groundAnchor, east: _east, north: _north, up: _up, height: buildingHeightM() }
+      : null,
+    renderFrame: () => {
+      camera.up.copy(camera.position).normalize();
+      skySphere.position.copy(camera.position);
+      skySphere.material.uniforms.upDir.value.copy(camera.up);
+      if (_postfx?.composer) _postfx.render();
+      else renderer.render(scene, camera);
+    },
+    updateTiles: () => {
+      tiles.setCamera(camera);
+      tiles.setResolutionFromRenderer(camera, renderer);
+      tiles.update();
+    },
+    tilesPending: () => {
+      const s = tiles.stats || {};
+      return (s.downloading || 0) + (s.parsing || 0);
+    },
+    setNavEnabled: (on) => { controls.enabled = on; },
+    beginCaptureResolution: (w, h) => {
+      _resizeObs?.disconnect();
+      _capPrevPR = renderer.getPixelRatio();
+      renderer.setPixelRatio(1);
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h; camera.updateProjectionMatrix();
+      if (_postfx?.composer) {
+        _postfx.composer.setPixelRatio(1);
+        _postfx.composer.setSize(w, h);
+        _postfx.ssao?.setSize?.(w, h);
+        _postfx.bloom?.setSize?.(w, h);
+      }
+    },
+    endCaptureResolution: () => {
+      renderer.setPixelRatio(_capPrevPR || window.devicePixelRatio);
+      const { W: rw, H: rh } = fitSize();
+      camera.aspect = rw / rh; camera.updateProjectionMatrix();
+      _postfx?.resize();
+      if (_resizeObs) _resizeObs.observe(canvas);
+    },
+  });
+  tiles._cineCleanup = () => { try { _cine?.dispose(); } catch {} };
 
   return {
     setSunHour(hour) {
