@@ -62,6 +62,39 @@ async function getActiveHDRIUrl() {
 }
 
 function getGoogleApiKey() { return localStorage.getItem('bizual_google_maps_key') || ''; }
+
+// Tune a building material for the Google 3D env. The Maxar env-map bake is
+// high-frequency and HDR-bright, which made two things go wrong vs the old
+// smooth HDRI: (1) mirror-sharp glass shimmered/flickered as the camera
+// micro-moved, and (2) bright env spots blew out white walls at Fresnel
+// angles. We dampen the env contribution and, for glass specifically, force
+// a stable soft-reflection look instead of a flickering mirror.
+function tuneBuildingMaterial(m) {
+  if (!m) return;
+  m.depthTest = true;
+  m.depthWrite = true;
+  const name = (m.name || '').toLowerCase();
+  const isGlass =
+    (m.transmission !== undefined && m.transmission > 0) ||
+    (m.transparent === true && (m.opacity ?? 1) < 1) ||
+    /glass|vidrio|cristal|window|ventan|glazing/.test(name) ||
+    // near-mirror dielectric/metal: the classic flickering culprit
+    (m.metalness !== undefined && m.metalness > 0.5 &&
+     m.roughness !== undefined && m.roughness < 0.15);
+  if (isGlass) {
+    // Soft, low-intensity reflection: stable across camera moves, no
+    // blow-out. Keeps a hint of the neighbourhood without the mirror.
+    if (m.roughness !== undefined) m.roughness = Math.max(m.roughness, 0.22);
+    if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.22;
+    // If the exporter left it opaque-but-named-glass, leave opacity alone;
+    // we only damp reflection, not transparency.
+  } else {
+    // Opaque façade: modest env reflection, roughness floor to avoid
+    // any incidental sharp speculars catching the hot env.
+    if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.35;
+    if (m.roughness !== undefined && m.roughness < 0.18) m.roughness = 0.18;
+  }
+}
 function saveGoogleApiKey(k) { localStorage.setItem('bizual_google_maps_key', (k || '').trim()); }
 
 // ─── Geo math (WGS84 ellipsoid — the same model Google's tiles use) ─────────
@@ -879,12 +912,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   sunLight.shadow.normalBias = 0.04;
   sunLight.visible = !sunParams.isNight;
   scene.add(sunLight);
-  // Hemisphere fill: simulates sky-bounce / ground-bounce ambient light so
-  // shadowed faces on the building don't crush to pitch-black. The previous
-  // AmbientLight at intensity 0.2 was too weak to compensate for the lack
-  // of a true HDRI bounce at this scale. Sky a bit cooler than pure white,
-  // ground a slightly warm dark grey to mimic asphalt / pavement.
-  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4a4a55, 1.2);
+  // Hemisphere fill: a gentle sky/ground bounce so shadowed faces don't
+  // crush to black BEFORE the Maxar env-map bake lands. Kept low (0.45)
+  // because once bakeEnvFromTiles() runs, scene.environment provides the
+  // real neighbourhood irradiance — at 1.2 the two stacked and blew out
+  // white walls depending on the view angle. This is just the floor fill
+  // for the first couple of seconds and the shadow side.
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4a4a55, 0.45);
   scene.add(hemiLight);
 
   document.getElementById('g3d-shadows').addEventListener('change', (e) => {
@@ -1139,25 +1173,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         // leave materials with depthTest=false or transparent=true).
         if (c.material) {
           const mats = Array.isArray(c.material) ? c.material : [c.material];
-          for (const m of mats) {
-            m.depthTest = true;
-            m.depthWrite = true;
-            // Clamp envMap influence on the building. The Google 3D panel runs
-            // with bumped exposure + HemisphereLight fill so Maxar terrain
-            // stays bright on the shadow side, but the building's PBR
-            // materials would otherwise pick up the full bake and blow out
-            // (especially white walls / glass). 0.6 keeps the realistic
-            // neighbourhood reflection without turning the façade into a
-            // light source.
-            if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.6;
-            // Roughness floor on reflective materials. Mirror-sharp glass
-            // (roughness ≈ 0) reflecting the high-frequency Maxar env map
-            // shimmers/flickers as the camera micro-moves under OrbitControls
-            // damping — classic specular aliasing. A small floor blurs the
-            // reflection just enough to kill the flicker without making the
-            // glass look matte.
-            if (m.roughness !== undefined && m.roughness < 0.12) m.roughness = 0.12;
-          }
+          for (const m of mats) tuneBuildingMaterial(m);
         }
         c.renderOrder = 0;
       }
@@ -1462,14 +1478,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _svModelRoot.traverse((o) => {
         if (!o.isMesh || !o.material) return;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (const m of mats) {
-          m.depthTest = true;
-          m.depthWrite = true;
-          // Same clamps as the main panel — prevent blow-out and kill the
-          // specular-aliasing flicker on sharp glass.
-          if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.6;
-          if (m.roughness !== undefined && m.roughness < 0.12) m.roughness = 0.12;
-        }
+        for (const m of mats) tuneBuildingMaterial(m);
       });
 
       // Camera in the local frame: at origin, looking toward -Z (compass
