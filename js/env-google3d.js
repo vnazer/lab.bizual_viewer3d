@@ -118,6 +118,8 @@ export function closeGoogle3DPanel() {
     if (_activeTiles._anchorInterval)  clearInterval(_activeTiles._anchorInterval);
     if (_activeTiles._anchorWatch)     clearInterval(_activeTiles._anchorWatch);
     if (_activeTiles._reAnchorTimer)   clearInterval(_activeTiles._reAnchorTimer);
+    if (_activeTiles._envBakeTimer)    clearInterval(_activeTiles._envBakeTimer);
+    if (_activeTiles._envCleanup) { try { _activeTiles._envCleanup(); } catch {} }
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
     try { _activeTiles.dispose(); } catch {}
     _activeTiles = null;
@@ -428,6 +430,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         <button id="g3d-quality-photo" title="Sube la calidad de tiles al máximo (errorTarget=4) para que se vean ultra-nítidos. Tarda más en cargar pero ideal antes de capturar.">📸 Calidad</button>
         <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido.">⚡ Rápido</button>
         <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
+        <button id="g3d-env-rebake" title="Rehornea el environment map desde los tiles Maxar actualmente cargados. Los vidrios/metales del edificio van a reflejar la cuadra real. Se hornea automático al anclar, usá esto si querés actualizar cuando cargó más detalle.">✨ Reflejos</button>
         <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
         <button id="g3d-save">💾 Guardar ajustes</button>
       </div>
@@ -658,16 +661,23 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // ─── HDRI environment + sun (synced from lab's sun_hour) ────────────────
   const pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
+  pmrem.compileCubemapShader();
   let _envMap = null;
   let _hdriObjectUrl = null;
+  // 'tiles' = baked from the live Maxar 3D Tiles scene; 'hdri' = the
+  // bundled HDRI panorama. Tiles is the default once Maxar streams in,
+  // because that's the building's *real* visual neighbourhood.
+  let _envSource = 'hdri';
 
   async function loadHDRI() {
     try {
       const url = await getActiveHDRIUrl();
       if (url.startsWith('blob:')) _hdriObjectUrl = url;
       new RGBELoader().load(url, (tex) => {
-        _envMap = pmrem.fromEquirectangular(tex).texture;
-        scene.environment = _envMap;
+        const newEnv = pmrem.fromEquirectangular(tex).texture;
+        if (_envMap && _envMap !== newEnv) _envMap.dispose();
+        _envMap = newEnv;
+        if (_envSource === 'hdri') scene.environment = _envMap;
         tex.dispose();
         if (_hdriObjectUrl) { URL.revokeObjectURL(_hdriObjectUrl); _hdriObjectUrl = null; }
       });
@@ -676,8 +686,85 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   if (document.getElementById('g3d-hdri').checked) loadHDRI();
   document.getElementById('g3d-hdri').addEventListener('change', (e) => {
     if (e.target.checked) loadHDRI();
-    else scene.environment = null;
+    else if (_envSource === 'hdri') scene.environment = null;
   });
+  document.getElementById('g3d-env-rebake').addEventListener('click', () => {
+    if (!bakeEnvFromTiles({ force: true })) {
+      console.warn('[Google 3D] ✨ rebake omitido — sin anchor o sin tiles visibles aún');
+    }
+  });
+
+  // ─── Dynamic reflection probe: Maxar tiles → cube map → PMREM ──────────
+  // For glass / metal materials on the GLB to reflect the *actual*
+  // neighbourhood instead of a generic HDRI, we render the loaded Maxar
+  // scene to a cube render target positioned at the building anchor, then
+  // pipe it through PMREMGenerator to get a pre-filtered envMap. Re-bake
+  // after the first anchor lands and on manual user request.
+  //
+  // Notes:
+  //   • The cube camera near/far must encompass the surrounding city
+  //     without including the model itself; we hide modelRoot during the
+  //     bake so the building doesn't reflect a static copy of itself.
+  //   • The sky sphere stays visible — it's the upper hemisphere of the
+  //     captured environment and matches the main render.
+  //   • 256² per face is enough for env IBL; bigger looks identical after
+  //     PMREM filtering and costs a lot more VRAM.
+  const _envCubeRT = new THREE.WebGLCubeRenderTarget(256, {
+    generateMipmaps: false,
+    type: THREE.HalfFloatType,
+  });
+  const _envCubeCam = new THREE.CubeCamera(1, 20_000, _envCubeRT);
+  let _envCubeTex = null; // PMREM texture cached for disposal
+  function bakeEnvFromTiles({ force = false } = {}) {
+    if (!_groundAnchor) return false;
+    // Wait until Maxar has some real coverage; otherwise the reflection is
+    // the basemap dome which makes glass look milky-blue everywhere.
+    const vis = tiles.visibleTiles?.size || 0;
+    if (!force && vis < 12) return false;
+    // Position the cube cam just above the building's base anchor so
+    // reflections sample from a realistic vantage (not from underground).
+    _envCubeCam.position.copy(_groundAnchor).addScaledVector(_up, 5);
+    const modelWasVisible = modelRoot ? modelRoot.visible : false;
+    if (modelRoot) modelRoot.visible = false;
+    try {
+      _envCubeCam.update(renderer, scene);
+      const tex = pmrem.fromCubemap(_envCubeRT.texture).texture;
+      if (_envCubeTex && _envCubeTex !== tex) _envCubeTex.dispose();
+      _envCubeTex = tex;
+      _envSource = 'tiles';
+      scene.environment = _envCubeTex;
+      console.log('[Google 3D] ✨ env-map horneado desde Maxar · visibleTiles=' + vis);
+    } catch (e) {
+      console.warn('[Google 3D] env-map bake falló:', e.message);
+    } finally {
+      if (modelRoot) modelRoot.visible = modelWasVisible;
+    }
+    return true;
+  }
+  // First auto-bake: small delay after the anchor lands so Maxar has time
+  // to refine to high-LOD around the lot. Retries every 4 s for the first
+  // 20 s while the cache fills up.
+  function scheduleAutoBake() {
+    if (tiles._envBakeTimer) return;
+    let attempts = 0;
+    tiles._envBakeTimer = setInterval(() => {
+      attempts++;
+      if (bakeEnvFromTiles()) {
+        // Re-bake once more after the cache has more tiles, then stop.
+        setTimeout(() => bakeEnvFromTiles({ force: true }), 4000);
+        clearInterval(tiles._envBakeTimer); tiles._envBakeTimer = null;
+      } else if (attempts >= 8) {
+        clearInterval(tiles._envBakeTimer); tiles._envBakeTimer = null;
+      }
+    }, 2500);
+  }
+  tiles._envCleanup = () => {
+    if (_envCubeTex) { try { _envCubeTex.dispose(); } catch {} _envCubeTex = null; }
+    if (_envCubeRT)  { try { _envCubeRT.dispose();  } catch {} }
+    if (_envMap)     { try { _envMap.dispose();     } catch {} _envMap = null; }
+    try { pmrem.dispose(); } catch {}
+  };
+
 
   const labHour = parseFloat(localStorage.getItem('bizual_lab_sun_hour') || '12');
   const sunParams = getSunParams(labHour);
@@ -835,6 +922,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       if (modelRoot) modelRoot.visible = true;
       frameOnAnchor(); // tween camera close so Maxar refines around the model
       console.log('[Google 3D] ✅ modelo anclado vía Elevation API · elev=' + _apiElevation.toFixed(1) + 'm');
+      scheduleAutoBake();
       return true;
     }
 
@@ -856,6 +944,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
                 '· hits válidos=' + r.count + '/25',
                 '· descartados (lejos)=' + r.rejected,
                 '· spread=' + (r.max - r.elev).toFixed(1) + 'm');
+    scheduleAutoBake();
     return true;
   }
 
