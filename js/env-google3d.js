@@ -22,7 +22,7 @@ import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
 import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
-import { mountCaptureEngine } from './capture-engine.js?v=20260528c';
+import { mountCaptureEngine } from './capture-engine.js?v=20260528e';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
@@ -531,6 +531,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       <details class="g3d-sec" open>
         <summary>🎥 Cámara &amp; vistas</summary>
         <div class="g3d-sec-body g3d-btn-grid">
+          <button id="g3d-view-center" title="Lleva la cámara a un encuadre 3/4 del edificio (útil si lo perdés de vista al navegar).">📍 Centrar edificio</button>
           <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
           <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
           <button id="g3d-view-sv" title="Sobrepone el modelo 3D sobre las fotos panorámicas reales de Google Street View.">🎬 Modelo sobre SV</button>
@@ -1649,6 +1650,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const lookAt = base.clone().addScaledVector(_up, 15);
     controls.target.copy(lookAt);
     animateCameraTo(camera, controls, eyePos, lookAt, 1200);
+  });
+  // Frame the building from a 3/4 angle at a distance scaled to its height, so
+  // a click always brings the model back into view no matter where you drifted.
+  document.getElementById('g3d-view-center').addEventListener('click', () => {
+    const base = modelBaseWorld();
+    const bh   = buildingHeightM();
+    const dist = THREE.MathUtils.clamp(bh * 2.0, 60, 420);
+    const high = THREE.MathUtils.clamp(bh * 1.3, 45, 320);
+    const eyePos = base.clone()
+      .addScaledVector(_east,  dist * 0.7)
+      .addScaledVector(_north, -dist * 0.7)
+      .addScaledVector(_up,    high);
+    const lookAt = base.clone().addScaledVector(_up, THREE.MathUtils.clamp(bh * 0.45, 8, 120));
+    controls.target.copy(lookAt);
+    animateCameraTo(camera, controls, eyePos, lookAt, 1100);
   });
 
   // ─── Street View + 3D model overlay ────────────────────────────────────
