@@ -193,7 +193,8 @@ function zipStore(files) {
 // }
 export function mountCaptureEngine(ctx) {
   const { camera, controls, canvas, getFrame, renderFrame, updateTiles, tilesPending,
-          setNavEnabled, beginCaptureResolution, endCaptureResolution } = ctx;
+          setNavEnabled, beginCaptureResolution, endCaptureResolution,
+          beginCaptureQuality, endCaptureQuality } = ctx;
 
   const animator = new CinematicAnimator(getFrame() || {
     anchor: new THREE.Vector3(), east: new THREE.Vector3(1, 0, 0),
@@ -227,6 +228,7 @@ export function mountCaptureEngine(ctx) {
         <input type="number" id="g3d-cine-height" min="5" max="3000" step="10" placeholder="auto">
         <span class="g3d-cine-unit">m</span>
       </label>
+      <div class="g3d-hint">🎯 El centro de la órbita <b>sigue al edificio</b>. Si la dirección no encaja, movelo con E/O · N/S · Altura o ⇧+click y la captura se recentra sola.</div>
       <div class="g3d-check-row">
         <label title="Reproduce el preset en bucle infinito para presentaciones en vivo."><input type="checkbox" id="g3d-cine-preview"> Modo Presentación</label>
         <label title="Segundos por vuelta del bucle de presentación.">⏱<input type="number" id="g3d-cine-loopsecs" min="4" max="120" step="1" value="24" style="width:46px"></label>
@@ -239,9 +241,12 @@ export function mountCaptureEngine(ctx) {
         <select id="g3d-cine-format" class="g3d-cine-select">
           <option value="transforms">Nerfstudio (transforms.json)</option>
           <option value="cameras">Bizual (cameras.json)</option>
-          <option value="both">Ambos</option>
+          <option value="both" selected>Ambos</option>
         </select>
       </label>
+      <div class="g3d-check-row">
+        <label title="Fuerza el máximo detalle de tiles SOLO durante la captura (espera a que cada cuadro cargue del todo). Así podés navegar en calidad baja/rápida y aún capturar en alta."><input type="checkbox" id="g3d-cine-maxq" checked> 🔍 Máxima calidad en captura</label>
+      </div>
       <div class="g3d-hint" id="g3d-cine-estimate">192 frames · 4K (3840×2160)</div>
       <button id="g3d-cine-go" class="g3d-cine-go">🎬 Generar Secuencia Splat</button>
       <div class="g3d-hint">Captura cuadro-a-cuadro esperando a que cada vista de los tiles de Maxar termine de cargar. Salida: un ZIP con los JPG 4K + las poses de cámara (<b>transforms.json</b>, Nerfstudio/COLMAP) para Gaussian Splatting.</div>
@@ -259,6 +264,7 @@ export function mountCaptureEngine(ctx) {
   const fpsInp = $('g3d-cine-fps');
   const estimateEl = $('g3d-cine-estimate');
   const formatSel = $('g3d-cine-format');
+  const maxqChk = $('g3d-cine-maxq');
   const goBtn = $('g3d-cine-go');
 
   const overrides = () => {
@@ -317,6 +323,10 @@ export function mountCaptureEngine(ctx) {
   // camera (host then skips controls.update so OrbitControls doesn't fight it).
   function tickPreview(now) {
     if (!state.previewOn) return false;
+    // Re-read the frame each tick so the orbit re-centres live if the user
+    // nudges the building (E/O · N/S · Altura · ⇧+click) while presenting.
+    const f = getFrame();
+    if (f) { animator.setFrame(f); animator.setPreset(presetSel.value, overrides()); }
     const t = ((now - state.previewStart) / 1000 / state.previewSecs) % 1;
     animator.applyToCamera(camera, t);
     return true;
@@ -381,9 +391,15 @@ export function mountCaptureEngine(ctx) {
     const captured = [];            // { name, data:Uint8Array }
     const poses = [];               // per-frame camera record (ENU-local)
     let aborted = false;
+    // "Máxima calidad en captura" lets the user navigate at a fast/low live
+    // quality while every captured frame is forced to max tile detail. Each
+    // frame then waits longer for the denser tiles to stream in.
+    const maxQ = !!maxqChk.checked;
+    const perFrameTimeout = maxQ ? 16000 : PER_FRAME_TIMEOUT;
 
     try {
       beginCaptureResolution(CAP_W, CAP_H);
+      if (maxQ) beginCaptureQuality?.();
       await nextRAF();
 
       for (let i = 0; i < frames; i++) {
@@ -394,7 +410,7 @@ export function mountCaptureEngine(ctx) {
 
         // Stream the 3D Tiles for THIS exact view to completion (or timeout).
         updateModal(i, frames, 'Cargando tiles de Maxar para el cuadro…');
-        const deadline = performance.now() + PER_FRAME_TIMEOUT;
+        const deadline = performance.now() + perFrameTimeout;
         let settled = 0;
         for (;;) {
           updateTiles();
@@ -423,6 +439,7 @@ export function mountCaptureEngine(ctx) {
       console.error('[capture] error', err);
       alert('Error durante la captura: ' + err.message);
     } finally {
+      if (maxQ) endCaptureQuality?.();
       endCaptureResolution();
       // Restore the live camera so the viewport doesn't jump.
       camera.aspect = saved.aspect; camera.fov = saved.fov; camera.updateProjectionMatrix();
