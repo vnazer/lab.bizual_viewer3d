@@ -63,37 +63,53 @@ async function getActiveHDRIUrl() {
 
 function getGoogleApiKey() { return localStorage.getItem('bizual_google_maps_key') || ''; }
 
-// Tune a building material for the Google 3D env. The Maxar env-map bake is
-// high-frequency and HDR-bright, which made two things go wrong vs the old
-// smooth HDRI: (1) mirror-sharp glass shimmered/flickered as the camera
-// micro-moved, and (2) bright env spots blew out white walls at Fresnel
-// angles. We dampen the env contribution and, for glass specifically, force
-// a stable soft-reflection look instead of a flickering mirror.
-function tuneBuildingMaterial(m) {
-  if (!m) return;
-  m.depthTest = true;
-  m.depthWrite = true;
+// Detect a glass-like material. The Maxar env-map bake is high-frequency and
+// HDR-bright, which makes mirror-sharp glass shimmer/flicker as the camera
+// micro-moves and can blow out white walls. We classify glass so the panel
+// can give it a stable, user-tunable treatment.
+function isGlassMaterial(m) {
+  if (!m) return false;
   const name = (m.name || '').toLowerCase();
-  const isGlass =
+  return (
     (m.transmission !== undefined && m.transmission > 0) ||
     (m.transparent === true && (m.opacity ?? 1) < 1) ||
     /glass|vidrio|cristal|window|ventan|glazing/.test(name) ||
-    // near-mirror dielectric/metal: the classic flickering culprit
     (m.metalness !== undefined && m.metalness > 0.5 &&
-     m.roughness !== undefined && m.roughness < 0.15);
-  if (isGlass) {
-    // Soft, low-intensity reflection: stable across camera moves, no
-    // blow-out. Keeps a hint of the neighbourhood without the mirror.
-    if (m.roughness !== undefined) m.roughness = Math.max(m.roughness, 0.22);
-    if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.22;
-    // If the exporter left it opaque-but-named-glass, leave opacity alone;
-    // we only damp reflection, not transparency.
-  } else {
-    // Opaque façade: modest env reflection, roughness floor to avoid
-    // any incidental sharp speculars catching the hot env.
-    if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.35;
-    if (m.roughness !== undefined && m.roughness < 0.18) m.roughness = 0.18;
-  }
+     m.roughness !== undefined && m.roughness < 0.15)
+  );
+}
+
+// Live-tunable glass treatment. reflect = envMapIntensity (0 kills the
+// reflection entirely → pure stable tinted glass), rough = roughness floor
+// (higher = softer/matte, kills specular-aliasing flicker), opacity drives
+// transparency. depthWrite=false + polygonOffset stop the coplanar
+// pane/frame z-fighting that reads as a grainy "titileo" on the glass.
+function applyGlassSettings(m, { reflect = 0.15, rough = 0.3, opacity = 0.55 } = {}) {
+  if (!m) return;
+  m.depthTest = true;
+  if (m.envMapIntensity !== undefined) m.envMapIntensity = reflect;
+  if (m.roughness !== undefined) m.roughness = Math.max(rough, 0.18);
+  if (m.metalness !== undefined) m.metalness = Math.min(m.metalness, 0.2);
+  // Treat as see-through glass: transparent, no depth write (so it sorts
+  // without z-fighting), slight polygon offset to break ties with the
+  // frame geometry right behind the pane.
+  m.transparent = true;
+  m.opacity = opacity;
+  m.depthWrite = false;
+  m.polygonOffset = true;
+  m.polygonOffsetFactor = 1;
+  m.polygonOffsetUnits = 1;
+  m.needsUpdate = true;
+}
+
+// Opaque façade: modest env reflection, roughness floor so incidental sharp
+// speculars don't catch the hot env. Keeps depthWrite so it occludes tiles.
+function applyFacadeSettings(m) {
+  if (!m) return;
+  m.depthTest = true;
+  m.depthWrite = true;
+  if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.35;
+  if (m.roughness !== undefined && m.roughness < 0.18) m.roughness = 0.18;
 }
 function saveGoogleApiKey(k) { localStorage.setItem('bizual_google_maps_key', (k || '').trim()); }
 
@@ -437,79 +453,111 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         🎬 <strong>Modelo sobre Street View real.</strong> Movete con las flechas del panorama. La cámara del modelo se sincroniza con la del Street View para que veas el edificio donde realmente va a estar.
       </div>
     </div>
-    <div class="g3d-bottom">
-      <div class="g3d-sliders">
-        <label title="Rotación alrededor del eje vertical (yaw). 0° = orientación original.">🔄 Rot
-          <input type="range" id="g3d-rot"   min="0"   max="360" step="1"    value="${sR}">
-          <span id="g3d-rot-val">${sR}°</span>
-        </label>
-        <label title="Inclinación adelante (+) / atrás (−) sobre el eje Este. Para ajustar si el modelo no calza perfecto perpendicular al terreno.">⤴️ Pitch
-          <input type="range" id="g3d-pitch" min="-15" max="15"  step="0.5"  value="${sP}">
-          <span id="g3d-pitch-val">${sP}°</span>
-        </label>
-        <label title="Inclinación lateral derecha (+) / izquierda (−) sobre el eje Norte.">🌀 Roll
-          <input type="range" id="g3d-roll"  min="-15" max="15"  step="0.5"  value="${sL}">
-          <span id="g3d-roll-val">${sL}°</span>
-        </label>
-        <label title="Metros sobre el suelo real (Maxar). Negativo = hundir el modelo">↕️ Altura
-          <input type="range" id="g3d-alt"   min="-30" max="60"  step="0.5"  value="${sA}">
-          <span id="g3d-alt-val">${sA} m</span>
-        </label>
-        <label title="Mover el modelo en sentido Este (+) / Oeste (−) sobre el suelo. Rango ±300 m para compensar geocoders que devuelven el centroide de la calle en vez del lote.">↔️ E/O
-          <input type="range" id="g3d-east"  min="-300" max="300" step="0.1"  value="${sE}">
-          <span id="g3d-east-val">${fmtEW(sE)}</span>
-        </label>
-        <label title="Mover el modelo en sentido Norte (+) / Sur (−) sobre el suelo. Rango ±300 m.">🧭 N/S
-          <input type="range" id="g3d-north" min="-300" max="300" step="0.1"  value="${sN}">
-          <span id="g3d-north-val">${fmtNS(sN)}</span>
-        </label>
-        <label>📐 Escala
-          <input type="range" id="g3d-scale" min="0.1" max="3"   step="0.05" value="${sS}">
-          <span id="g3d-scale-val">${sS}×</span>
-        </label>
-        <label title="Calidad de los tiles de Maxar. 10 = máximo detalle (carga más pesado). 1 = más liviano. Usá los botones 📸/⚡ para presets.">🎯 Calidad
-          <input type="range" id="g3d-quality" min="1" max="10" step="1" value="${sQ}">
-          <span id="g3d-quality-val">${sQ}/10</span>
-        </label>
-      </div>
-      <div class="g3d-quality">
-        <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
-        <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
-        <button id="g3d-view-sv" title="Sobrepone el modelo 3D sobre las fotos panorámicas reales de Google Street View. La cámara del modelo se sincroniza con la del panorama así caminás por la calle real y ves el edificio en su ubicación.">🎬 Modelo sobre Street View</button>
-        <button id="g3d-view-sv-tab" title="Abre Google Street View en una pestaña nueva (sin el modelo 3D encima).">🌆 SV (pestaña)</button>
-        <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
-        <button id="g3d-quality-photo" title="Sube la calidad de tiles al máximo (errorTarget=4) para que se vean ultra-nítidos. Tarda más en cargar pero ideal antes de capturar.">📸 Calidad</button>
-        <button id="g3d-quality-fast"  title="Calidad balanceada para uso normal (errorTarget=14). Carga rápido.">⚡ Rápido</button>
-        <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
-        <button id="g3d-env-rebake" title="Rehornea el environment map desde los tiles Maxar actualmente cargados. Los vidrios/metales del edificio van a reflejar la cuadra real. Se hornea automático al anclar, usá esto si querés actualizar cuando cargó más detalle.">✨ Reflejos</button>
-        <label title="Sombras del sol desactivadas por defecto en este entorno — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
-        <button id="g3d-save">💾 Guardar ajustes</button>
-      </div>
-    </div>
-    <div id="g3d-anchorbadge" title="Origen y valor del anchor de altura del modelo. Verde = Elevation API determinística. Naranja = raycast no-determinístico (puede flotar)."
-         style="position:absolute;top:54px;right:8px;z-index:40;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.25);border-radius:4px;padding:6px 10px;font-size:12px;font-family:ui-monospace,monospace;display:flex;gap:8px;align-items:center;">
-      <span id="g3d-anchor-status">Anchor: ⏳ buscando…</span>
-      <button id="g3d-reanchor" title="Re-intentar el anchor (vuelve a llamar a la API y al raycast)"
-              style="background:rgba(80,160,240,0.35);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;">🎯 Re-anclar</button>
-      <span style="opacity:0.6">·</span>
-      <span>Forzar elev (m):</span>
-      <input type="number" id="g3d-elev-override" step="1" min="-500" max="9000" placeholder="auto"
-             style="width:64px;background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:2px 4px;font-size:11px;font-family:ui-monospace,monospace;">
-      <button id="g3d-elev-apply" title="Plantar el modelo a esa elevación exacta (anula API y raycast)"
-              style="background:rgba(120,200,120,0.35);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;">Aplicar</button>
-      <span style="opacity:0.6">·</span>
-      <span title="Mantené Shift y hacé click sobre el suelo Maxar para mover el edificio al punto exacto. Útil cuando el geocoder cae a la mitad de la calle.">⇧+click = snap</span>
-      <span style="opacity:0.6">·</span>
-      <label title="Exposición del renderer (multiplica el brillo lineal antes del tone mapping). Se aplica en vivo." style="display:flex;align-items:center;gap:4px;">Expo
-        <input type="range" id="g3d-expo" min="0.5" max="2" step="0.05"
-               style="width:80px;vertical-align:middle;">
-        <span id="g3d-expo-val" style="min-width:34px;text-align:right;font-family:ui-monospace,monospace;font-size:11px;"></span>
-      </label>
-      <label title="Contraste del PostFX (negativo aplana, positivo arrecia)." style="display:flex;align-items:center;gap:4px;">Contraste
-        <input type="range" id="g3d-contrast" min="-0.2" max="0.4" step="0.01"
-               style="width:80px;vertical-align:middle;">
-        <span id="g3d-contrast-val" style="min-width:38px;text-align:right;font-family:ui-monospace,monospace;font-size:11px;"></span>
-      </label>
+    <button id="g3d-side-toggle" title="Mostrar/ocultar el panel de controles">⚙️</button>
+    <div id="g3d-side" class="g3d-side">
+
+      <details class="g3d-sec" open>
+        <summary>⚓ Anclaje &amp; posición</summary>
+        <div class="g3d-sec-body">
+          <div class="g3d-anchor-line">
+            <span id="g3d-anchor-status">Anchor: ⏳ buscando…</span>
+            <button id="g3d-reanchor" title="Re-intentar el anchor (vuelve a llamar a la API y al raycast)">🎯 Re-anclar</button>
+          </div>
+          <div class="g3d-anchor-line">
+            <span>Forzar elev (m):</span>
+            <input type="number" id="g3d-elev-override" step="1" min="-500" max="9000" placeholder="auto">
+            <button id="g3d-elev-apply" title="Plantar el modelo a esa elevación exacta (anula API y raycast)">Aplicar</button>
+          </div>
+          <div class="g3d-hint">⇧+click sobre el suelo Maxar = mover el edificio a ese punto exacto</div>
+          <label title="Rotación alrededor del eje vertical (yaw). 0° = orientación original.">🔄 Rot
+            <input type="range" id="g3d-rot"   min="0"   max="360" step="1"    value="${sR}">
+            <span id="g3d-rot-val">${sR}°</span>
+          </label>
+          <label title="Inclinación adelante (+) / atrás (−) sobre el eje Este.">⤴️ Pitch
+            <input type="range" id="g3d-pitch" min="-15" max="15"  step="0.5"  value="${sP}">
+            <span id="g3d-pitch-val">${sP}°</span>
+          </label>
+          <label title="Inclinación lateral derecha (+) / izquierda (−) sobre el eje Norte.">🌀 Roll
+            <input type="range" id="g3d-roll"  min="-15" max="15"  step="0.5"  value="${sL}">
+            <span id="g3d-roll-val">${sL}°</span>
+          </label>
+          <label title="Metros sobre el suelo real (Maxar). Negativo = hundir el modelo">↕️ Altura
+            <input type="range" id="g3d-alt"   min="-30" max="60"  step="0.5"  value="${sA}">
+            <span id="g3d-alt-val">${sA} m</span>
+          </label>
+          <label title="Mover el modelo en sentido Este (+) / Oeste (−). Rango ±300 m.">↔️ E/O
+            <input type="range" id="g3d-east"  min="-300" max="300" step="0.1"  value="${sE}">
+            <span id="g3d-east-val">${fmtEW(sE)}</span>
+          </label>
+          <label title="Mover el modelo en sentido Norte (+) / Sur (−). Rango ±300 m.">🧭 N/S
+            <input type="range" id="g3d-north" min="-300" max="300" step="0.1"  value="${sN}">
+            <span id="g3d-north-val">${fmtNS(sN)}</span>
+          </label>
+          <label>📐 Escala
+            <input type="range" id="g3d-scale" min="0.1" max="3"   step="0.05" value="${sS}">
+            <span id="g3d-scale-val">${sS}×</span>
+          </label>
+        </div>
+      </details>
+
+      <details class="g3d-sec" open>
+        <summary>🎥 Cámara &amp; vistas</summary>
+        <div class="g3d-sec-body g3d-btn-grid">
+          <button id="g3d-view-street" title="Cámara al pie del edificio, altura humana (1.65 m)">🚶 Calle</button>
+          <button id="g3d-view-aerial" title="Vista aérea oblicua a 80 m">🛩 Aérea</button>
+          <button id="g3d-view-sv" title="Sobrepone el modelo 3D sobre las fotos panorámicas reales de Google Street View.">🎬 Modelo sobre SV</button>
+          <button id="g3d-view-sv-tab" title="Abre Google Street View en una pestaña nueva (sin el modelo 3D encima).">🌆 SV (pestaña)</button>
+          <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
+        </div>
+      </details>
+
+      <details class="g3d-sec" open>
+        <summary>🎨 Render &amp; luz</summary>
+        <div class="g3d-sec-body">
+          <label title="Calidad de los tiles de Maxar. 10 = máximo detalle (carga más pesado).">🎯 Calidad
+            <input type="range" id="g3d-quality" min="1" max="10" step="1" value="${sQ}">
+            <span id="g3d-quality-val">${sQ}/10</span>
+          </label>
+          <label title="Exposición del renderer. Se aplica en vivo.">☀️ Expo
+            <input type="range" id="g3d-expo" min="0.5" max="2" step="0.05">
+            <span id="g3d-expo-val"></span>
+          </label>
+          <label title="Contraste del PostFX (negativo aplana, positivo arrecia).">◐ Contraste
+            <input type="range" id="g3d-contrast" min="-0.2" max="0.4" step="0.01">
+            <span id="g3d-contrast-val"></span>
+          </label>
+          <div class="g3d-btn-grid">
+            <button id="g3d-quality-photo" title="Calidad de tiles al máximo. Ideal antes de capturar.">📸 Calidad</button>
+            <button id="g3d-quality-fast"  title="Calidad balanceada, carga rápido.">⚡ Rápido</button>
+            <button id="g3d-env-rebake" title="Rehornea el environment map desde los tiles Maxar para que los reflejos usen la cuadra real.">✨ Reflejos</button>
+          </div>
+          <div class="g3d-check-row">
+            <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
+            <label title="Sombras del sol — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
+          </div>
+        </div>
+      </details>
+
+      <details class="g3d-sec" open>
+        <summary>🪟 Vidrios</summary>
+        <div class="g3d-sec-body">
+          <label title="Intensidad del reflejo del entorno en el vidrio. 0 = cristal plano sin reflejo (máxima estabilidad). Subir = más reflejo del barrio (puede titilar).">Reflejo
+            <input type="range" id="g3d-glass-reflect" min="0" max="1" step="0.01" value="${_glassState.reflect}">
+            <span id="g3d-glass-reflect-val">${_glassState.reflect.toFixed(2)}</span>
+          </label>
+          <label title="Nitidez del vidrio. Bajo = espejo nítido (titila con env de alta frecuencia). Alto = mate/difuso (estable).">Nitidez
+            <input type="range" id="g3d-glass-rough" min="0.18" max="1" step="0.01" value="${_glassState.rough}">
+            <span id="g3d-glass-rough-val">${_glassState.rough.toFixed(2)}</span>
+          </label>
+          <label title="Transparencia del vidrio. 1 = opaco, 0 = totalmente transparente.">Opacidad
+            <input type="range" id="g3d-glass-opacity" min="0.05" max="1" step="0.01" value="${_glassState.opacity}">
+            <span id="g3d-glass-opacity-val">${_glassState.opacity.toFixed(2)}</span>
+          </label>
+          <div class="g3d-hint">Si el vidrio titila, bajá <b>Reflejo</b> a 0 o subí <b>Nitidez</b>.</div>
+        </div>
+      </details>
+
+      <button id="g3d-save">💾 Guardar ajustes</button>
     </div>
     <div class="g3d-attribution">© Google · Imagery ©2025 Maxar Technologies</div>
   `;
@@ -710,6 +758,43 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     if (_postfx) _postfx.setContrast(v);
     contOut.textContent = v.toFixed(2);
   });
+
+  // ─── Vidrios (glass) live controls ──────────────────────────────────────
+  // Retune the collected glass materials on every input. Persisted so the
+  // user's preferred glass look survives a reload / next address.
+  function bindGlassSlider(id, valId, key, decimals = 2) {
+    const inp = document.getElementById(id);
+    const out = document.getElementById(valId);
+    if (!inp || !out) return;
+    // input → live retune (in-memory, cheap). change → persist once on
+    // release (localStorage.setItem is synchronous/blocking, don't fire it
+    // on every drag tick).
+    inp.addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      _glassState[key] = v;
+      out.textContent = v.toFixed(decimals);
+      applyGlassState();
+    });
+    inp.addEventListener('change', (e) => {
+      localStorage.setItem('bizual_g3d_glass_' + key, String(parseFloat(e.target.value)));
+    });
+  }
+  bindGlassSlider('g3d-glass-reflect', 'g3d-glass-reflect-val', 'reflect');
+  bindGlassSlider('g3d-glass-rough',   'g3d-glass-rough-val',   'rough');
+  bindGlassSlider('g3d-glass-opacity', 'g3d-glass-opacity-val', 'opacity');
+
+  // Side panel collapse toggle.
+  const sideToggle = document.getElementById('g3d-side-toggle');
+  const sidePanel = document.getElementById('g3d-side');
+  if (sideToggle && sidePanel) {
+    // Start with the toggle sitting to the LEFT of the open panel.
+    sideToggle.classList.add('g3d-side-toggle-active');
+    sideToggle.addEventListener('click', () => {
+      const hidden = sidePanel.classList.toggle('g3d-side-hidden');
+      // When the panel is hidden the toggle slides back to the edge.
+      sideToggle.classList.toggle('g3d-side-toggle-active', !hidden);
+    });
+  }
 
   window.__tiles = tiles;
   // Expose THREE so you can poke at the scene from the console (the module
@@ -1173,7 +1258,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         // leave materials with depthTest=false or transparent=true).
         if (c.material) {
           const mats = Array.isArray(c.material) ? c.material : [c.material];
-          for (const m of mats) tuneBuildingMaterial(m);
+          for (const m of mats) {
+            if (isGlassMaterial(m)) { _glassMats.push(m); applyGlassSettings(m, _glassState); }
+            else applyFacadeSettings(m);
+          }
         }
         c.renderOrder = 0;
       }
@@ -1478,7 +1566,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _svModelRoot.traverse((o) => {
         if (!o.isMesh || !o.material) return;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (const m of mats) tuneBuildingMaterial(m);
+        // Clones share material refs with the originals, so the glass slider
+        // updates flow through here too. Just ensure each is classified.
+        for (const m of mats) {
+          if (isGlassMaterial(m)) applyGlassSettings(m, _glassState);
+          else applyFacadeSettings(m);
+        }
       });
 
       // Camera in the local frame: at origin, looking toward -Z (compass
