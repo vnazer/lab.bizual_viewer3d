@@ -466,6 +466,17 @@ export async function openGoogle3DPanel(coords, modelUrl) {
               style="background:rgba(120,200,120,0.35);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;">Aplicar</button>
       <span style="opacity:0.6">·</span>
       <span title="Mantené Shift y hacé click sobre el suelo Maxar para mover el edificio al punto exacto. Útil cuando el geocoder cae a la mitad de la calle.">⇧+click = snap</span>
+      <span style="opacity:0.6">·</span>
+      <label title="Exposición del renderer (multiplica el brillo lineal antes del tone mapping). Se aplica en vivo." style="display:flex;align-items:center;gap:4px;">Expo
+        <input type="range" id="g3d-expo" min="0.5" max="2" step="0.05"
+               style="width:80px;vertical-align:middle;">
+        <span id="g3d-expo-val" style="min-width:34px;text-align:right;font-family:ui-monospace,monospace;font-size:11px;"></span>
+      </label>
+      <label title="Contraste del PostFX (negativo aplana, positivo arrecia)." style="display:flex;align-items:center;gap:4px;">Contraste
+        <input type="range" id="g3d-contrast" min="-0.2" max="0.4" step="0.01"
+               style="width:80px;vertical-align:middle;">
+        <span id="g3d-contrast-val" style="min-width:38px;text-align:right;font-family:ui-monospace,monospace;font-size:11px;"></span>
+      </label>
     </div>
     <div class="g3d-attribution">© Google · Imagery ©2025 Maxar Technologies</div>
   `;
@@ -642,6 +653,30 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   _postfx.setBloom(_labBloom.on, _labBloom.intensity);
   _postfx.setContrast(0);
   tiles._postfx = _postfx; // for cleanup on close
+
+  // ─── Live Expo + Contraste sliders (top bar, next to Forzar elev) ──────
+  // These give the operator instant visual tuning without bouncing back
+  // to the main viewer. Defaults read from the active state so opening
+  // the panel shows the value that's already in effect.
+  const expoInp = document.getElementById('g3d-expo');
+  const expoOut = document.getElementById('g3d-expo-val');
+  expoInp.value = String(renderer.toneMappingExposure || 1.15);
+  expoOut.textContent = parseFloat(expoInp.value).toFixed(2);
+  expoInp.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    renderer.toneMappingExposure = v;
+    expoOut.textContent = v.toFixed(2);
+  });
+  const contInp = document.getElementById('g3d-contrast');
+  const contOut = document.getElementById('g3d-contrast-val');
+  const _initialContrast = _postfx?.contrast?.uniforms?.contrast?.value ?? 0;
+  contInp.value = String(_initialContrast);
+  contOut.textContent = (+_initialContrast).toFixed(2);
+  contInp.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    if (_postfx) _postfx.setContrast(v);
+    contOut.textContent = v.toFixed(2);
+  });
 
   window.__tiles = tiles;
   // Expose THREE so you can poke at the scene from the console (the module
