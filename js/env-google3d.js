@@ -505,8 +505,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // Tone-map + exposure: clone whatever the main viewer is using so the
   // Google 3D panel doesn't visually drift from the rest of the app. Keys
   // are written by viewer.js via the LS_PREFIX = 'bizual_lab_' helper.
+  // Defaults match viewer.js (agx + 1.15) so a fresh user gets the same
+  // exposure baseline whether they're in the lab or the Google 3D panel.
   const _labTonemapId = readLabSetting('tonemap', 'agx');
-  const _labExposure  = readLabSetting('exposure', 1.0);
+  const _labExposure  = readLabSetting('exposure', 1.15);
   const TONEMAP_MAP = {
     agx:      THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping,
     aces:     THREE.ACESFilmicToneMapping,
@@ -624,25 +626,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // ~0.5 m, maxDistance 0.5). At city scale that radius is invisible.
   // We override the SSAO range to suit street/block scale so it actually
   // adds depth to roof/façade junctions without sampling the whole frame.
-  const _labSSAO = {
-    on:        readLabSetting('ssao_on',        true),
-    intensity: readLabSetting('ssao_intensity', 20),
-  };
+  // Bloom only — SSAO and Contrast are disabled in this env on purpose:
+  //   • SSAO would stack on top of Maxar's photogrammetry, which already
+  //     bakes ambient occlusion into the texture. The two together crush
+  //     roof/façade junctions to pitch black.
+  //   • Contrast >0 reads like aggressive grading over already-graded
+  //     aerial imagery and ruins the "I'm looking at the real street"
+  //     feeling. Set 0 here regardless of the main viewer slider.
   const _labBloom = {
     on:        readLabSetting('bloom_on',        true),
     intensity: readLabSetting('bloom_intensity', 0.30),
   };
-  const _labContrast = readLabSetting('contrast', 0.10);
   const _postfx = new PostFX(renderer, scene, camera, canvas);
-  // Re-tune SSAO for urban scale: bigger kernel in world units, deeper
-  // sampling range than the room-scale default. The intensity slider from
-  // the main UI still drives the relative strength via setSSAO(on, n).
-  _postfx.ssao.kernelRadius = 8;     // metres in world space
-  _postfx.ssao.minDistance  = 0.0002; // ≈ 4 m at far=20 000
-  _postfx.ssao.maxDistance  = 0.02;   // ≈ 400 m
-  _postfx.setSSAO(_labSSAO.on, _labSSAO.intensity);
+  _postfx.setSSAO(false);
   _postfx.setBloom(_labBloom.on, _labBloom.intensity);
-  _postfx.setContrast(_labContrast);
+  _postfx.setContrast(0);
   tiles._postfx = _postfx; // for cleanup on close
 
   window.__tiles = tiles;
@@ -835,20 +833,24 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const labHour = parseFloat(localStorage.getItem('bizual_lab_sun_hour') || '12');
   const sunParams = getSunParams(labHour);
   const sunDir = getSunDirectionECEF(lat, lon, sunParams.azimut, sunParams.elevation);
-  const sunLight = new THREE.DirectionalLight(sunParams.sunColor, Math.max(0.3, sunParams.sunIntensity));
+  // Cap sun intensity at 1.5 so it doesn't blow out Maxar's already-bright
+  // photogrammetry texture during midday hours; the HemisphereLight below
+  // fills the shadow side so we don't need a screaming sun.
+  const sunIntensity = Math.max(0.3, Math.min(1.5, sunParams.sunIntensity));
+  const sunLight = new THREE.DirectionalLight(sunParams.sunColor, sunIntensity);
   sunLight.position.copy(sunDir.clone().multiplyScalar(1e7));
-  // Shadow mapping disabled for the Google 3D env: the light's shadow camera
-  // can't realistically cover a model at ECEF (~6.4e6 m from origin) without
-  // either being enormous (precision errors → WebGL "too many errors", broken
-  // context) or losing the model entirely. HDRI + direct lighting is enough
-  // for the photorealistic tiles. Shadows can be re-added with a per-frame
-  // shadow-camera reposition around the anchored model later.
   sunLight.castShadow = false;
   sunLight.shadow.bias = -0.0001;
   sunLight.shadow.normalBias = 0.04;
   sunLight.visible = !sunParams.isNight;
   scene.add(sunLight);
-  scene.add(new THREE.AmbientLight(0xc8d8e0, 0.2));
+  // Hemisphere fill: simulates sky-bounce / ground-bounce ambient light so
+  // shadowed faces on the building don't crush to pitch-black. The previous
+  // AmbientLight at intensity 0.2 was too weak to compensate for the lack
+  // of a true HDRI bounce at this scale. Sky a bit cooler than pure white,
+  // ground a slightly warm dark grey to mimic asphalt / pavement.
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4a4a55, 1.2);
+  scene.add(hemiLight);
 
   document.getElementById('g3d-shadows').addEventListener('change', (e) => {
     sunLight.castShadow = e.target.checked;
