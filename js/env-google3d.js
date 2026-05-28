@@ -386,6 +386,21 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   const panel = document.createElement('div');
   panel.id = 'g3d-panel';
+
+  // Glass materials collected at load time so the "Vidrios" controls can
+  // retune them live. _glassState holds the current slider values. Declared
+  // here (before panel.innerHTML) because the Vidrios slider template reads
+  // _glassState.* — declaring it later would TDZ-crash the panel render.
+  const _glassMats = [];
+  const _glassState = {
+    reflect: parseFloat(localStorage.getItem('bizual_g3d_glass_reflect') ?? '0.15'),
+    rough:   parseFloat(localStorage.getItem('bizual_g3d_glass_rough')   ?? '0.30'),
+    opacity: parseFloat(localStorage.getItem('bizual_g3d_glass_opacity') ?? '0.55'),
+  };
+  function applyGlassState() {
+    for (const m of _glassMats) applyGlassSettings(m, _glassState);
+  }
+
   const sR = parseFloat(localStorage.getItem('bizual_g3d_rot')   || 0);
   const sP = parseFloat(localStorage.getItem('bizual_g3d_pitch') || 0);
   const sL = parseFloat(localStorage.getItem('bizual_g3d_roll')  || 0);
