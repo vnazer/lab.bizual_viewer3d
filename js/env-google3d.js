@@ -21,6 +21,18 @@ import {
 import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
 import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
+import { PostFX } from './postfx.js?v=20260519';
+
+// Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
+// panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
+const LAB_LS_PREFIX = 'bizual_lab_';
+function readLabSetting(key, fallback) {
+  try {
+    const raw = localStorage.getItem(LAB_LS_PREFIX + key);
+    if (raw == null) return fallback;
+    return JSON.parse(raw);
+  } catch { return fallback; }
+}
 
 const GOOGLE_TILES_URL = 'https://tile.googleapis.com/v1/3dtiles/root.json';
 const DRACO_DECODER    = 'https://www.gstatic.com/draco/v1/decoders/';
@@ -120,6 +132,7 @@ export function closeGoogle3DPanel() {
     if (_activeTiles._reAnchorTimer)   clearInterval(_activeTiles._reAnchorTimer);
     if (_activeTiles._envBakeTimer)    clearInterval(_activeTiles._envBakeTimer);
     if (_activeTiles._envCleanup) { try { _activeTiles._envCleanup(); } catch {} }
+    if (_activeTiles._postfx)     { try { _activeTiles._postfx.dispose(); } catch {} }
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
     try { _activeTiles.dispose(); } catch {}
     _activeTiles = null;
@@ -489,9 +502,23 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     preserveDrawingBuffer: true,
   });
   renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.toneMapping = THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.95;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // Tone-map + exposure: clone whatever the main viewer is using so the
+  // Google 3D panel doesn't visually drift from the rest of the app. Keys
+  // are written by viewer.js via the LS_PREFIX = 'bizual_lab_' helper.
+  const _labTonemapId = readLabSetting('tonemap', 'agx');
+  const _labExposure  = readLabSetting('exposure', 1.0);
+  const TONEMAP_MAP = {
+    agx:      THREE.AgXToneMapping ?? THREE.ACESFilmicToneMapping,
+    aces:     THREE.ACESFilmicToneMapping,
+    neutral:  THREE.NeutralToneMapping ?? THREE.ACESFilmicToneMapping,
+    cineon:   THREE.CineonToneMapping,
+    reinhard: THREE.ReinhardToneMapping,
+    linear:   THREE.LinearToneMapping,
+    none:     THREE.NoToneMapping,
+  };
+  renderer.toneMapping         = TONEMAP_MAP[_labTonemapId] ?? THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = _labExposure;
+  renderer.outputColorSpace    = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   _activeRenderer = renderer;
@@ -586,6 +613,38 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   tiles.setResolutionFromRenderer(camera, renderer);
   scene.add(tiles.group);
   _activeTiles = tiles;
+
+  // ─── PostFX pipeline ────────────────────────────────────────────────────
+  // Clone the visual look from the main viewer (SSAO + Bloom + Contrast
+  // intensities are stored under the same LS_PREFIX). The pipeline uses
+  // the env-google3d's own renderer/scene/camera — we keep coord systems
+  // separate so ECEF precision and local-scale precision don't fight.
+  //
+  // SSAO note: PostFX defaults are tuned for room-scale (kernelRadius
+  // ~0.5 m, maxDistance 0.5). At city scale that radius is invisible.
+  // We override the SSAO range to suit street/block scale so it actually
+  // adds depth to roof/façade junctions without sampling the whole frame.
+  const _labSSAO = {
+    on:        readLabSetting('ssao_on',        true),
+    intensity: readLabSetting('ssao_intensity', 20),
+  };
+  const _labBloom = {
+    on:        readLabSetting('bloom_on',        true),
+    intensity: readLabSetting('bloom_intensity', 0.30),
+  };
+  const _labContrast = readLabSetting('contrast', 0.10);
+  const _postfx = new PostFX(renderer, scene, camera, canvas);
+  // Re-tune SSAO for urban scale: bigger kernel in world units, deeper
+  // sampling range than the room-scale default. The intensity slider from
+  // the main UI still drives the relative strength via setSSAO(on, n).
+  _postfx.ssao.kernelRadius = 8;     // metres in world space
+  _postfx.ssao.minDistance  = 0.0002; // ≈ 4 m at far=20 000
+  _postfx.ssao.maxDistance  = 0.02;   // ≈ 400 m
+  _postfx.setSSAO(_labSSAO.on, _labSSAO.intensity);
+  _postfx.setBloom(_labBloom.on, _labBloom.intensity);
+  _postfx.setContrast(_labContrast);
+  tiles._postfx = _postfx; // for cleanup on close
+
   window.__tiles = tiles;
   // Expose THREE so you can poke at the scene from the console (the module
   // import otherwise keeps it scoped to this file).
@@ -1672,7 +1731,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     // distance from the globe; gradient stays aligned to local up.
     skySphere.position.copy(camera.position);
     skySphere.material.uniforms.upDir.value.copy(camera.up);
-    renderer.render(scene, camera);
+    // Route every frame through the post-processing composer. RenderPass
+    // calls renderer.render(scene, camera) internally so tiles state stays
+    // in sync. If PostFX failed to construct for any reason, fall back to
+    // direct render so the panel doesn't go black.
+    if (_postfx?.composer) _postfx.render();
+    else renderer.render(scene, camera);
   }
   animate();
 
@@ -1681,6 +1745,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     const { W: w, H: h } = fitSize();
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    _postfx?.resize();
   });
   _resizeObs.observe(canvas);
 
