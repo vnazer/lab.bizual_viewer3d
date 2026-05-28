@@ -22,7 +22,7 @@ import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
 import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
-import { mountCaptureEngine } from './capture-engine.js?v=20260528a';
+import { mountCaptureEngine } from './capture-engine.js?v=20260528c';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
@@ -2104,12 +2104,17 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return Math.max(8, hi - lo);
   };
   let _capPrevPR = renderer.getPixelRatio();
+  let _capPrevErrorTarget = null;
   _cine = mountCaptureEngine({
     THREE, camera, controls, renderer, scene, canvas, tiles,
     hudParent: document.getElementById('g3d-side'),
     panelRoot: document.getElementById('g3d-panel'),
+    // Orbit/spiral centre = the building's ACTUAL base (anchor + the user's
+    // E/O · N/S · Altura offsets + ⇧+click), via modelBaseWorld(), so the
+    // capture follows wherever the operator placed the model — not the raw
+    // geocoded anchor (which often lands off the building).
     getFrame: () => _groundAnchor
-      ? { anchor: _groundAnchor, east: _east, north: _north, up: _up, height: buildingHeightM() }
+      ? { anchor: modelBaseWorld(), east: _east, north: _north, up: _up, height: buildingHeightM() }
       : null,
     renderFrame: () => {
       camera.up.copy(camera.position).normalize();
@@ -2128,6 +2133,17 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       return (s.downloading || 0) + (s.parsing || 0);
     },
     setNavEnabled: (on) => { controls.enabled = on; },
+    // Force max tile detail for the capture only, then restore the live value —
+    // so the operator can navigate at a fast/low quality but still capture sharp
+    // frames (the per-frame wait loop streams the denser tiles in).
+    beginCaptureQuality: () => {
+      _capPrevErrorTarget = tiles.errorTarget;
+      tiles.errorTarget = calidadToErrorTarget(10);
+    },
+    endCaptureQuality: () => {
+      if (_capPrevErrorTarget != null) tiles.errorTarget = _capPrevErrorTarget;
+      _capPrevErrorTarget = null;
+    },
     beginCaptureResolution: (w, h) => {
       _resizeObs?.disconnect();
       _capPrevPR = renderer.getPixelRatio();
