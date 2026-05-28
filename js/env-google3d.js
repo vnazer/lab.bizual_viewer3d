@@ -376,7 +376,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     <canvas id="g3d-canvas"></canvas>
     <div id="g3d-svfull" style="display:none;position:absolute;top:48px;left:0;right:0;bottom:88px;z-index:50;background:#000">
       <div id="g3d-svpano" style="position:absolute;inset:0"></div>
-      <canvas id="g3d-svcanvas" style="position:absolute;inset:0;pointer-events:none"></canvas>
+      <canvas id="g3d-svcanvas" style="position:absolute;inset:0;z-index:1;pointer-events:none"></canvas>
       <button id="g3d-svfull-close" title="Cerrar (Esc)"
               style="position:absolute;top:8px;right:8px;z-index:51;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:4px;padding:6px 12px;cursor:pointer;font-size:13px;">✕ Cerrar</button>
       <div id="g3d-svfull-hint" style="position:absolute;top:8px;left:8px;z-index:51;background:rgba(0,0,0,0.78);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:4px;padding:6px 12px;font-size:12px;max-width:380px;line-height:1.3;">
@@ -1165,6 +1165,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         logarithmicDepthBuffer: true,
       });
       _svRenderer.setPixelRatio(window.devicePixelRatio);
+      // Force a fully transparent clear so the Street View panorama shows
+      // through every pixel that isn't part of the model.
+      _svRenderer.setClearColor(0x000000, 0);
       _svScene = new THREE.Scene();
       // Clone the loaded model so we have an instance to render in this
       // separate scene without removing it from the main 3D view.
@@ -1188,21 +1191,59 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       };
       new ResizeObserver(sizeSV).observe(svCanvas);
       sizeSV();
+
+      // Strict POV/zoom/position binding. The rAF loop renders every frame,
+      // but explicit event listeners give us a single place to log the
+      // sync state and let us force an immediate camera update so the model
+      // stops "lagging" behind the panorama during fast pan/zoom gestures.
+      _svPanorama.addListener('pov_changed', () => syncSvCamera('pov_changed'));
+      _svPanorama.addListener('zoom_changed', () => syncSvCamera('zoom_changed'));
+      _svPanorama.addListener('position_changed', () => {
+        const p = _svPanorama.getPosition();
+        if (!p) return;
+        const d = haversineMeters(lat, lon, p.lat(), p.lng());
+        const b = bearingDeg(p.lat(), p.lng(), lat, lon);
+        console.log('[Google 3D · SV] position_changed · ' + p.lat().toFixed(6) + ',' + p.lng().toFixed(6) +
+                    ' · edificio a ' + d.toFixed(1) + ' m · azimut ' + b.toFixed(0) + '°');
+        syncSvCamera('position_changed');
+      });
+
       svAnimate();
     } else {
       _svPanorama.setVisible(true);
     }
   }
-  function svAnimate() {
-    _svAnimFrame = requestAnimationFrame(svAnimate);
-    if (!_svPanorama || !_svRenderer) return;
+
+  // Great-circle distance between two lat/lon in metres (Haversine). Used
+  // for the diagnostic log on position_changed so the user can confirm the
+  // Street View camera is in the right neighbourhood relative to the lot.
+  function haversineMeters(lat1, lon1, lat2, lon2) {
+    const R = 6_371_000;
+    const φ1 = lat1 * DEG2RAD, φ2 = lat2 * DEG2RAD;
+    const Δφ = (lat2 - lat1) * DEG2RAD;
+    const Δλ = (lon2 - lon1) * DEG2RAD;
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+  // Initial bearing (azimut) from point 1 to point 2, in degrees clockwise
+  // from true north. Matches Street View's heading convention.
+  function bearingDeg(lat1, lon1, lat2, lon2) {
+    const φ1 = lat1 * DEG2RAD, φ2 = lat2 * DEG2RAD;
+    const Δλ = (lon2 - lon1) * DEG2RAD;
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return (Math.atan2(y, x) / DEG2RAD + 360) % 360;
+  }
+
+  // Snapshot of the panorama POV → three.js camera. Shared between the
+  // event listeners (instant response on user gesture) and the rAF loop
+  // (which keeps drawing the latest model transform every frame). Idempotent.
+  function syncSvCamera(reason) {
+    if (!_svPanorama || !_svCamera) return false;
     const pos = _svPanorama.getPosition();
     const pov = _svPanorama.getPov();
-    if (!pos || !pov) return;
+    if (!pos || !pov) return false;
     const pLat = pos.lat(), pLng = pos.lng();
-    // Camera position: Street View's pano location at observer height (Google's
-    // cameras sit ~2.5 m above ground). Use the Elevation API ground value if
-    // available, otherwise the same as the model's anchor.
     const groundElev = (_apiElevation != null)
       ? _apiElevation
       : (_groundAnchor ? (_groundAnchor.length() - _targetSurface.length()) : 0);
@@ -1220,17 +1261,33 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _svCamera.position.copy(camPos);
     _svCamera.up.copy(uV);
     _svCamera.lookAt(camPos.clone().add(lookDir));
-    // Street View FOV decreases with zoom (~180°/2^zoom).
     const z = _svPanorama.getZoom() || 1;
     const fovDeg = Math.max(20, Math.min(120, 180 / Math.pow(2, z)));
-    if (Math.abs(_svCamera.fov - fovDeg) > 0.5) {
+    if (Math.abs(_svCamera.fov - fovDeg) > 0.05) {
       _svCamera.fov = fovDeg;
       _svCamera.updateProjectionMatrix();
     }
+    if (reason) {
+      // Throttle the log: only fire on listener events, not every rAF frame.
+      console.log('[Google 3D · SV] ' + reason + ' · heading=' + pov.heading.toFixed(1) +
+                  '° pitch=' + pov.pitch.toFixed(1) + '° zoom=' + z.toFixed(2) +
+                  ' → fov=' + fovDeg.toFixed(1) + '°');
+    }
+    return true;
+  }
+  function svAnimate() {
+    _svAnimFrame = requestAnimationFrame(svAnimate);
+    if (!_svRenderer || !_svScene || !_svCamera) return;
+    // Idle-state safety: don't render until the panorama has a position and
+    // pov (during first ~100 ms the panorama hasn't reported yet).
+    if (!syncSvCamera(null)) return;
     // Mirror the model's transform from the main scene (user offsets, scale,
-    // rotation all show through here).
-    _svModelRoot.matrix.copy(modelRoot.matrix);
-    _svModelRoot.matrixWorldNeedsUpdate = true;
+    // rotation all show through here). modelRoot.matrixAutoUpdate is off so
+    // applyGeoTransform() is the one source of truth for the world matrix.
+    if (modelRoot) {
+      _svModelRoot.matrix.copy(modelRoot.matrix);
+      _svModelRoot.matrixWorldNeedsUpdate = true;
+    }
     _svRenderer.render(_svScene, _svCamera);
   }
   function closeStreetViewOverlay() {
