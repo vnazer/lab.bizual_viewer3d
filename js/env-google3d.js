@@ -303,7 +303,12 @@ function showPreflightError(detail) {
 
 // ─── Main panel ───────────────────────────────────────────────────────────
 export async function openGoogle3DPanel(coords, modelUrl) {
-  const { lat, lon, display } = coords;
+  // Force max-precision floats. Some callers (saved localStorage, URL params)
+  // pass strings; implicit coercion happens later anyway but explicit
+  // parseFloat avoids any silent truncation in the trig that follows.
+  const lat = parseFloat(coords.lat);
+  const lon = parseFloat(coords.lon ?? coords.lng);
+  const display = coords.display;
   console.log('[Google 3D] abriendo panel · lat=' + lat + ' · lon=' + lon + ' · display="' + display + '"');
   const apiKey = getGoogleApiKey();
   if (!apiKey) { openApiKeyDialog(coords, modelUrl); return; }
@@ -417,12 +422,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           <input type="range" id="g3d-alt"   min="-30" max="60"  step="0.5"  value="${sA}">
           <span id="g3d-alt-val">${sA} m</span>
         </label>
-        <label title="Mover el modelo en sentido Este (+) / Oeste (−) sobre el suelo">↔️ E/O
-          <input type="range" id="g3d-east"  min="-40" max="40"  step="0.5"  value="${sE}">
+        <label title="Mover el modelo en sentido Este (+) / Oeste (−) sobre el suelo. Rango ±300 m para compensar geocoders que devuelven el centroide de la calle en vez del lote.">↔️ E/O
+          <input type="range" id="g3d-east"  min="-300" max="300" step="0.1"  value="${sE}">
           <span id="g3d-east-val">${fmtEW(sE)}</span>
         </label>
-        <label title="Mover el modelo en sentido Norte (+) / Sur (−) sobre el suelo">🧭 N/S
-          <input type="range" id="g3d-north" min="-40" max="40"  step="0.5"  value="${sN}">
+        <label title="Mover el modelo en sentido Norte (+) / Sur (−) sobre el suelo. Rango ±300 m.">🧭 N/S
+          <input type="range" id="g3d-north" min="-300" max="300" step="0.1"  value="${sN}">
           <span id="g3d-north-val">${fmtNS(sN)}</span>
         </label>
         <label>📐 Escala
@@ -459,6 +464,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
              style="width:64px;background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:2px 4px;font-size:11px;font-family:ui-monospace,monospace;">
       <button id="g3d-elev-apply" title="Plantar el modelo a esa elevación exacta (anula API y raycast)"
               style="background:rgba(120,200,120,0.35);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:3px;padding:3px 8px;cursor:pointer;font-size:11px;">Aplicar</button>
+      <span style="opacity:0.6">·</span>
+      <span title="Mantené Shift y hacé click sobre el suelo Maxar para mover el edificio al punto exacto. Útil cuando el geocoder cae a la mitad de la calle.">⇧+click = snap</span>
     </div>
     <div class="g3d-attribution">© Google · Imagery ©2025 Maxar Technologies</div>
   `;
@@ -1187,6 +1194,65 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   bindSlider('g3d-east',  'g3d-east-val',  1, ' m', (v) => offsetE = v, fmtEW);
   bindSlider('g3d-north', 'g3d-north-val', 1, ' m', (v) => offsetN = v, fmtNS);
   bindSlider('g3d-scale', 'g3d-scale-val', 2, '×',  (v) => scaleMx = v);
+
+  // ─── Shift+click snap: place the building on the clicked tile point ────
+  // Geocoders (Places, OSM) often return a street centroid, not the rooftop
+  // of the actual lot. The ±300 m sliders cover this in principle but
+  // require manual hunting. Shift+click on the photo-textured Maxar terrain
+  // gives the operator a single-gesture way to plant the building exactly
+  // where they want it.
+  //
+  //   1. NDC pick → raycast tiles.group recursively (model is a sibling
+  //      under scene, so it can't self-intersect).
+  //   2. Compute the hit's displacement from the current _groundAnchor.
+  //   3. Project that displacement onto local east / north / up axes (the
+  //      ENU basis we already computed for the target lat/lon).
+  //   4. Write those projections back to offsetE / offsetN / altOffset
+  //      AND sync the slider DOM so the user can fine-tune from there.
+  const _snapRay = new THREE.Raycaster();
+  _snapRay.firstHitOnly = true;
+  const _ndc = new THREE.Vector2();
+  const _tmpDisp = new THREE.Vector3();
+  function syncSliderFromValue(id, valId, value, format) {
+    const inp = document.getElementById(id);
+    const out = document.getElementById(valId);
+    if (!inp || !out) return;
+    // Clamp into the slider's own range so the DOM stays consistent even if
+    // the snap landed beyond ±300 m (extreme geocoder failure).
+    const min = parseFloat(inp.min), max = parseFloat(inp.max);
+    const clamped = Math.max(min, Math.min(max, value));
+    inp.value = String(clamped);
+    out.textContent = format ? format(clamped) : (clamped.toFixed(1) + ' m');
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!e.shiftKey) return;
+    if (!_groundAnchor) {
+      console.warn('[Google 3D] Shift+click ignorado — esperá a que ancle el modelo');
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    _ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+    _ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+    _snapRay.setFromCamera(_ndc, camera);
+    const hits = _snapRay.intersectObject(tiles.group, true);
+    if (!hits.length) {
+      console.warn('[Google 3D] Shift+click no impactó ningún tile');
+      return;
+    }
+    _tmpDisp.copy(hits[0].point).sub(_groundAnchor);
+    const dE = _tmpDisp.dot(_east);
+    const dN = _tmpDisp.dot(_north);
+    const dU = _tmpDisp.dot(_up);
+    offsetE  = dE;
+    offsetN  = dN;
+    altOffset = dU;
+    applyGeoTransform();
+    syncSliderFromValue('g3d-east',  'g3d-east-val',  offsetE,  fmtEW);
+    syncSliderFromValue('g3d-north', 'g3d-north-val', offsetN,  fmtNS);
+    syncSliderFromValue('g3d-alt',   'g3d-alt-val',   altOffset);
+    console.log('[Google 3D] 📍 snap a Maxar · ΔE=' + dE.toFixed(1) + 'm · ΔN=' + dN.toFixed(1) +
+                'm · ΔU=' + dU.toFixed(1) + 'm');
+  });
 
   let qualityVal = sQ; // 1-10, where 10 = max detail
   const qInp = document.getElementById('g3d-quality');
