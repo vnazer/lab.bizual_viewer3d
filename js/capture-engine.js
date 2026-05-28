@@ -1,9 +1,12 @@
 // ─── Cinematic Capture & Animation Engine ──────────────────────────────────
-// Google Earth Studio-style camera presets (Orbit / Spiral / Fly-to+Orbit)
-// executed directly in our WebGL viewport, plus a deterministic frame-stepper
-// that captures a frame-per-pose dataset of the unbuilt building inside the
-// photorealistic 3D Tiles environment. Output is a single ZIP (4K JPEGs +
-// cameras.json poses) ready for the PlayCanvas / Gaussian-Splatting pipeline.
+// Google Earth Studio-style camera presets (orbit, 90/180 pans, spiral vortex,
+// fly-to, aerial reveal, dolly-in, façade pan, top-down→oblique) executed
+// directly in our WebGL viewport, with a save/load animation library (portable
+// JSON), an endless preview loop for presentations, and a deterministic
+// frame-stepper that exports either:
+//   • a marketing video — H.264 MP4 via WebCodecs + mp4-muxer (WebM fallback), or
+//   • a Gaussian-Splatting dataset — a ZIP of 4K JPEGs + Nerfstudio/COLMAP
+//     transforms.json (and/or cameras.json) poses for PlayCanvas.
 //
 // IMPORTANT — coordinate system: the Google 3D scene lives in ECEF (earth-
 // centred), where "up" is the radial direction, NOT the world Y axis. All
@@ -15,6 +18,29 @@ import * as THREE from 'three';
 
 const DEG2RAD = Math.PI / 180;
 const smoothstep = (t) => { t = Math.min(1, Math.max(0, t)); return t * t * (3 - 2 * t); };
+
+// Built-in animation library shown in the preset dropdown. `dur` is a sensible
+// default duration (s) auto-filled when the preset is picked.
+export const PRESETS = [
+  { v: 'orbit',   label: '🛰 Órbita 360°',            dur: 16 },
+  { v: 'pan90',   label: '↔ Paneo 90°',               dur: 5  },
+  { v: 'pan180',  label: '↔ Paneo 180°',              dur: 8  },
+  { v: 'spiral',  label: '🌀 Espiral (vórtice)',       dur: 18 },
+  { v: 'flyto',   label: '🎯 Zoom In + Órbita',        dur: 12 },
+  { v: 'reveal',  label: '🏙 Reveal aéreo',            dur: 14 },
+  { v: 'dolly',   label: '🎥 Acercamiento (dolly-in)', dur: 8  },
+  { v: 'facade',  label: '🏢 Fachada (paneo frontal)', dur: 9  },
+  { v: 'topdown', label: '🛸 Top-down → oblicua',      dur: 12 },
+];
+const PRESET_DUR = Object.fromEntries(PRESETS.map((p) => [p.v, p.dur]));
+
+// Video output resolutions (H.264 needs even dimensions; all are 16:9 even).
+const VIDEO_RES = {
+  '720p':  [1280, 720],
+  '1080p': [1920, 1080],
+  '1440p': [2560, 1440],
+  '4k':    [3840, 2160],
+};
 
 // ─── 1. Mathematical trajectory presets ─────────────────────────────────────
 // Pure math over a normalised timeline t ∈ [0,1]. No DOM, no three scene — just
@@ -36,31 +62,64 @@ export class CinematicAnimator {
     const R  = THREE.MathUtils.clamp(bh * 2.6, 120, 600);   // orbit radius
     const H  = THREE.MathUtils.clamp(bh * 1.10, 50, 500);   // orbit altitude
     const tH = THREE.MathUtils.clamp(bh * 0.45, 8, 140);    // look-at height
-    if (type === 'spiral') return {
-      radiusOuter: Math.max(R * 2.6, 800), radiusInner: Math.max(R * 0.7, 180),
-      heightStart: Math.max(H * 2.4, 600), heightEnd: H,
-      targetHeight: tH, startDeg: 0, turns: 2.5,
-    };
-    if (type === 'flyto') return {
-      radius: R, height: H, targetHeight: tH, startDeg: 0, turns: 0.85,
-      flyDist: Math.max(R * 4, 1500), flyHeight: Math.max(H * 3, 700),
-      flyBearingDeg: 205, hook: 0.45,
-    };
-    return { radius: R, height: H, targetHeight: tH, startDeg: 0, turns: 1 }; // orbit
+    const base = { radius: R, height: H, targetHeight: tH, startDeg: 0, arcDeg: 360 };
+    switch (type) {
+      case 'pan90':  return { ...base, arcDeg: 90 };
+      case 'pan180': return { ...base, arcDeg: 180 };
+      case 'spiral': return {
+        radiusOuter: Math.max(R * 2.6, 800), radiusInner: Math.max(R * 0.7, 180),
+        heightStart: Math.max(H * 2.4, 600), heightEnd: H,
+        targetHeight: tH, startDeg: 0, arcDeg: 900,   // ~2.5 turns
+      };
+      case 'flyto': return {
+        radius: R, height: H, targetHeight: tH, startDeg: 0, arcDeg: 306,
+        flyDist: Math.max(R * 4, 1500), flyHeight: Math.max(H * 3, 700),
+        flyBearingDeg: 205, hook: 0.45,
+      };
+      case 'reveal': return {       // aerial reveal: descend + sweep
+        radiusFar: Math.max(R * 2.2, 700), radiusNear: R,
+        heightHigh: Math.max(H * 3, 650), heightLow: H,
+        targetHeight: tH, startDeg: 0, arcDeg: 220,
+      };
+      case 'dolly': return {        // straight push-in from a bearing
+        radiusFar: Math.max(R * 3, 900), radiusNear: Math.max(R * 0.45, 55),
+        height: H, targetHeight: tH, startDeg: 200, arcDeg: 0,
+      };
+      case 'facade': return {       // frontal lateral pan (short arc)
+        radius: Math.max(R * 0.95, 90), height: THREE.MathUtils.clamp(bh * 0.6, 20, 220),
+        targetHeight: THREE.MathUtils.clamp(bh * 0.5, 10, 160), startDeg: 0, arcDeg: 70,
+      };
+      case 'topdown': return {      // nadir → oblique, descending + rotating
+        radiusStart: Math.max(R * 0.4, 40), radiusEnd: R,
+        heightStart: Math.max(H * 4, 900), heightEnd: H,
+        targetHeight: tH, startDeg: 0, arcDeg: 130,
+      };
+      default: return base;         // orbit (arcDeg 360)
+    }
   }
 
   // Apply preset + optional user overrides (radius/height come from the HUD).
   setPreset(type, overrides = {}) {
     this.preset = type;
-    const base = this.defaultsFor(type);
-    for (const k of Object.keys(overrides)) {
-      if (overrides[k] == null || Number.isNaN(overrides[k])) continue;
-      // Map the two generic HUD knobs onto each preset's matching fields.
-      if (k === 'radius') { base.radius = overrides[k]; base.radiusOuter = overrides[k] * 2.6; base.radiusInner = Math.max(overrides[k] * 0.6, 120); }
-      else if (k === 'height') { base.height = overrides[k]; base.heightStart = overrides[k] * 2.4; base.heightEnd = overrides[k]; }
-      else base[k] = overrides[k];
+    const b = this.defaultsFor(type);
+    const r = overrides.radius, h = overrides.height;
+    if (Number.isFinite(r)) {        // scale every radius field off the one knob
+      b.radius = r;
+      b.radiusOuter = r * 2.6; b.radiusInner = Math.max(r * 0.6, 90);
+      b.radiusFar = r * 2.4;   b.radiusNear = Math.max(r * 0.45, 45);
+      b.radiusStart = Math.max(r * 0.4, 30); b.radiusEnd = r;
     }
-    this.params = base;
+    if (Number.isFinite(h)) {
+      b.height = h;
+      b.heightStart = h * 2.4; b.heightEnd = h;
+      b.heightHigh = h * 3;    b.heightLow = h;
+    }
+    for (const k of Object.keys(overrides)) {
+      if (k === 'radius' || k === 'height') continue;
+      const v = overrides[k];
+      if (v != null && !Number.isNaN(v)) b[k] = v;
+    }
+    this.params = b;
   }
 
   // anchor + east·e + north·n + up·u  →  an ECEF point.
@@ -73,39 +132,53 @@ export class CinematicAnimator {
 
   getTarget(/* t */) { return this._local(0, 0, this.params.targetHeight ?? 20); }
 
+  // Polar track {R, az(deg), H} shared by every preset except flyto's approach.
+  _polar(t) {
+    const p = this.params;
+    const sm = smoothstep(t);
+    switch (this.preset) {
+      case 'spiral': {
+        // Geometric (exponential) radius → constant shrink ratio per turn = a
+        // true logarithmic vortex rather than a flat ramp.
+        const ratio = Math.max(1e-3, p.radiusInner / p.radiusOuter);
+        return { R: p.radiusOuter * Math.pow(ratio, t), az: p.startDeg + p.arcDeg * t,
+                 H: p.heightStart + (p.heightEnd - p.heightStart) * sm };
+      }
+      case 'reveal':
+        return { R: p.radiusFar + (p.radiusNear - p.radiusFar) * sm, az: p.startDeg + p.arcDeg * t,
+                 H: p.heightHigh + (p.heightLow - p.heightHigh) * sm };
+      case 'dolly':
+        return { R: p.radiusFar + (p.radiusNear - p.radiusFar) * sm, az: p.startDeg, H: p.height };
+      case 'facade':
+        return { R: p.radius, az: p.startDeg - p.arcDeg / 2 + p.arcDeg * t, H: p.height };
+      case 'topdown':
+        return { R: p.radiusStart + (p.radiusEnd - p.radiusStart) * sm, az: p.startDeg + p.arcDeg * t,
+                 H: p.heightStart + (p.heightEnd - p.heightStart) * sm };
+      default: // orbit, pan90, pan180
+        return { R: p.radius, az: p.startDeg + (p.arcDeg ?? 360) * t, H: p.height };
+    }
+  }
+
   getPosition(t) {
     const p = this.params;
-
-    if (this.preset === 'orbit') {
-      const az = (p.startDeg + 360 * p.turns * t) * DEG2RAD;
+    // flyto: a straight eased approach from a far point that lands exactly on
+    // the orbit's entry pose (no positional snap), then orbits.
+    if (this.preset === 'flyto') {
+      const hook = p.hook;
+      const entryAz = p.startDeg * DEG2RAD;
+      const entry = this._local(p.radius * Math.sin(entryAz), p.radius * Math.cos(entryAz), p.height);
+      if (t <= hook) {
+        const bz = p.flyBearingDeg * DEG2RAD;
+        const start = this._local(p.flyDist * Math.sin(bz), p.flyDist * Math.cos(bz), p.flyHeight);
+        return start.lerp(entry, smoothstep(t / hook));
+      }
+      const tt = (t - hook) / (1 - hook);
+      const az = (p.startDeg + p.arcDeg * tt) * DEG2RAD;
       return this._local(p.radius * Math.sin(az), p.radius * Math.cos(az), p.height);
     }
-
-    if (this.preset === 'spiral') {
-      // Geometric (exponential) radius interpolation → a constant shrink ratio
-      // per turn, i.e. a true logarithmic vortex rather than a flat ramp.
-      const ratio = Math.max(1e-3, p.radiusInner / p.radiusOuter);
-      const R = p.radiusOuter * Math.pow(ratio, t);
-      const az = (p.startDeg + 360 * p.turns * t) * DEG2RAD;
-      const H = p.heightStart + (p.heightEnd - p.heightStart) * smoothstep(t);
-      return this._local(R * Math.sin(az), R * Math.cos(az), H);
-    }
-
-    // flyto: a straight eased approach from a far point into the orbit's entry
-    // pose, then a seamless hand-off into the orbit loop. The approach lands on
-    // the exact orbit-entry position (no positional snap); smoothstep eases the
-    // approach so the camera arrives gently before the orbit takes over.
-    const hook = p.hook;
-    const entryAz = p.startDeg * DEG2RAD;
-    const entry = this._local(p.radius * Math.sin(entryAz), p.radius * Math.cos(entryAz), p.height);
-    if (t <= hook) {
-      const bz = p.flyBearingDeg * DEG2RAD;
-      const start = this._local(p.flyDist * Math.sin(bz), p.flyDist * Math.cos(bz), p.flyHeight);
-      return start.lerp(entry, smoothstep(t / hook));
-    }
-    const tt = (t - hook) / (1 - hook);
-    const az = (p.startDeg + 360 * p.turns * tt) * DEG2RAD;
-    return this._local(p.radius * Math.sin(az), p.radius * Math.cos(az), p.height);
+    const { R, az, H } = this._polar(t);
+    const a = az * DEG2RAD;
+    return this._local(R * Math.sin(a), R * Math.cos(a), H);
   }
 
   // Drive a three camera at normalised time t. ECEF "up" is radial.
@@ -211,33 +284,51 @@ export function mountCaptureEngine(ctx) {
   section.className = 'g3d-sec';
   section.open = true;
   section.innerHTML = `
-    <summary>🎬 Cine &amp; captura Splat</summary>
+    <summary>🎬 Cine &amp; captura</summary>
     <div class="g3d-sec-body">
-      <label title="Preset de trayectoria de cámara.">🎞 Preset
-        <select id="g3d-cine-preset" class="g3d-cine-select">
-          <option value="orbit">🛰 Órbita 360°</option>
-          <option value="spiral">🌀 Espiral (vórtice)</option>
-          <option value="flyto">🎯 Zoom In + Órbita</option>
+      <label title="Estilo de animación de cámara (librería de presets inmobiliarios).">🎞 Animación
+        <select id="g3d-cine-preset" class="g3d-cine-select"></select>
+      </label>
+      <label title="Animaciones guardadas (las que guardes o importes).">📂 Guardadas
+        <select id="g3d-cine-saved" class="g3d-cine-select"><option value="">— elegir —</option></select>
+      </label>
+      <div class="g3d-cine-row">
+        <label title="Radio de la órbita en metros. Vacío = automático según el alto del edificio.">📏 Radio<input type="number" id="g3d-cine-radius" min="20" max="3000" step="10" placeholder="auto"></label>
+        <label title="Altura de cámara sobre el suelo, en metros. Vacío = automático.">🛗 Alt<input type="number" id="g3d-cine-height" min="5" max="3000" step="10" placeholder="auto"></label>
+      </div>
+      <div class="g3d-hint">🎯 El centro <b>sigue al edificio</b>: si la dirección no encaja, movelo con E/O · N/S · Altura o ⇧+click y la animación se recentra sola.</div>
+      <div class="g3d-check-row">
+        <label title="Reproduce la animación en bucle infinito para presentaciones en vivo."><input type="checkbox" id="g3d-cine-preview"> Modo Presentación</label>
+        <label title="Segundos por vuelta del bucle.">⏱<input type="number" id="g3d-cine-loopsecs" min="4" max="120" step="1" value="20" style="width:44px"></label>
+      </div>
+      <div class="g3d-cine-lib">
+        <button id="g3d-cine-save" title="Guardar la animación actual con un nombre.">💾 Guardar</button>
+        <button id="g3d-cine-del" title="Borrar la animación guardada seleccionada.">🗑</button>
+        <button id="g3d-cine-export" title="Exportar las animaciones guardadas como JSON (portable a la app de Bizual en AWS).">⬇ JSON</button>
+        <button id="g3d-cine-import" title="Importar animaciones desde un JSON.">⬆ JSON</button>
+        <input type="file" id="g3d-cine-importfile" accept="application/json" style="display:none">
+      </div>
+
+      <div class="g3d-cine-divider">Exportar</div>
+      <label title="Qué generar: un video MP4 para marketing, o un dataset de fotos para Gaussian Splatting.">🎬 Salida
+        <select id="g3d-cine-output" class="g3d-cine-select">
+          <option value="video" selected>🎬 Video MP4 (marketing)</option>
+          <option value="photos">📸 Fotos (dataset Splat)</option>
         </select>
       </label>
-      <label title="Radio de la órbita en metros. Vacío = automático según el alto del edificio.">📏 Radio
-        <input type="number" id="g3d-cine-radius" min="20" max="3000" step="10" placeholder="auto">
-        <span class="g3d-cine-unit">m</span>
+      <label id="g3d-cine-reswrap" title="Resolución del video.">🖥 Resolución
+        <select id="g3d-cine-res" class="g3d-cine-select">
+          <option value="720p">720p</option>
+          <option value="1080p" selected>1080p</option>
+          <option value="1440p">1440p</option>
+          <option value="4k">4K</option>
+        </select>
       </label>
-      <label title="Altura de cámara sobre el suelo, en metros. Vacío = automático.">🛗 Altura
-        <input type="number" id="g3d-cine-height" min="5" max="3000" step="10" placeholder="auto">
-        <span class="g3d-cine-unit">m</span>
-      </label>
-      <div class="g3d-hint">🎯 El centro de la órbita <b>sigue al edificio</b>. Si la dirección no encaja, movelo con E/O · N/S · Altura o ⇧+click y la captura se recentra sola.</div>
-      <div class="g3d-check-row">
-        <label title="Reproduce el preset en bucle infinito para presentaciones en vivo."><input type="checkbox" id="g3d-cine-preview"> Modo Presentación</label>
-        <label title="Segundos por vuelta del bucle de presentación.">⏱<input type="number" id="g3d-cine-loopsecs" min="4" max="120" step="1" value="24" style="width:46px"></label>
-      </div>
       <div class="g3d-cine-row">
-        <label title="Duración de la secuencia a capturar, en segundos.">Duración<input type="number" id="g3d-cine-dur" min="1" max="120" step="1" value="8"></label>
-        <label title="Cuadros por segundo del dataset.">FPS<input type="number" id="g3d-cine-fps" min="6" max="60" step="1" value="24"></label>
+        <label title="Duración del clip / la secuencia en segundos.">Duración<input type="number" id="g3d-cine-dur" min="1" max="120" step="1" value="16"></label>
+        <label title="Cuadros por segundo.">FPS<input type="number" id="g3d-cine-fps" min="6" max="60" step="1" value="30"></label>
       </div>
-      <label title="Formato de las poses dentro del ZIP. Nerfstudio/COLMAP (transforms.json) es el estándar que ingiere PlayCanvas para Gaussian Splatting.">📐 Poses
+      <label id="g3d-cine-formatwrap" title="Formato de poses dentro del ZIP (solo fotos). Nerfstudio/COLMAP es el estándar que ingiere PlayCanvas." style="display:none">📐 Poses
         <select id="g3d-cine-format" class="g3d-cine-select">
           <option value="transforms">Nerfstudio (transforms.json)</option>
           <option value="cameras">Bizual (cameras.json)</option>
@@ -245,27 +336,40 @@ export function mountCaptureEngine(ctx) {
         </select>
       </label>
       <div class="g3d-check-row">
-        <label title="Fuerza el máximo detalle de tiles SOLO durante la captura (espera a que cada cuadro cargue del todo). Así podés navegar en calidad baja/rápida y aún capturar en alta."><input type="checkbox" id="g3d-cine-maxq" checked> 🔍 Máxima calidad en captura</label>
+        <label title="Fuerza el máximo detalle de tiles SOLO durante la captura (espera a que cada cuadro cargue). Navegá en calidad baja/rápida y aún capturá/grabá en alta."><input type="checkbox" id="g3d-cine-maxq" checked> 🔍 Máxima calidad</label>
       </div>
-      <div class="g3d-hint" id="g3d-cine-estimate">192 frames · 4K (3840×2160)</div>
-      <button id="g3d-cine-go" class="g3d-cine-go">🎬 Generar Secuencia Splat</button>
-      <div class="g3d-hint">Captura cuadro-a-cuadro esperando a que cada vista de los tiles de Maxar termine de cargar. Salida: un ZIP con los JPG 4K + las poses de cámara (<b>transforms.json</b>, Nerfstudio/COLMAP) para Gaussian Splatting.</div>
+      <div class="g3d-hint" id="g3d-cine-estimate"></div>
+      <button id="g3d-cine-go" class="g3d-cine-go">🎬 Generar Video MP4</button>
     </div>`;
   const saveBtn = ctx.hudParent.querySelector('#g3d-save');
   ctx.hudParent.insertBefore(section, saveBtn || null);
 
   const $ = (id) => section.querySelector('#' + id);
   const presetSel = $('g3d-cine-preset');
+  const savedSel  = $('g3d-cine-saved');
   const radiusInp = $('g3d-cine-radius');
   const heightInp = $('g3d-cine-height');
   const previewChk = $('g3d-cine-preview');
   const loopSecsInp = $('g3d-cine-loopsecs');
+  const outputSel = $('g3d-cine-output');
+  const resWrap   = $('g3d-cine-reswrap');
+  const resSel    = $('g3d-cine-res');
   const durInp = $('g3d-cine-dur');
   const fpsInp = $('g3d-cine-fps');
-  const estimateEl = $('g3d-cine-estimate');
+  const formatWrap = $('g3d-cine-formatwrap');
   const formatSel = $('g3d-cine-format');
   const maxqChk = $('g3d-cine-maxq');
+  const estimateEl = $('g3d-cine-estimate');
   const goBtn = $('g3d-cine-go');
+
+  // Populate the animation library dropdown from PRESETS.
+  presetSel.innerHTML = PRESETS.map((p) => `<option value="${p.v}">${p.label}</option>`).join('');
+
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  const nextRAF = () => new Promise((r) => requestAnimationFrame(() => r()));
+  const toBlob = (q) => new Promise((res) => canvas.toBlob(res, 'image/jpeg', q));
+  const pad4 = (n) => String(n).padStart(4, '0');
+  const noAnchor = () => { alert('Primero anclá el edificio (⇧+click sobre el suelo Maxar) para definir el centro de la animación.'); };
 
   const overrides = () => {
     const r = parseFloat(radiusInp.value), h = parseFloat(heightInp.value);
@@ -274,13 +378,35 @@ export function mountCaptureEngine(ctx) {
     if (Number.isFinite(h)) o.height = h;
     return o;
   };
-  const totalFrames = () => Math.max(1, Math.round((parseFloat(durInp.value) || 8) * (parseFloat(fpsInp.value) || 24)));
-  const refreshEstimate = () => {
+  const isVideo = () => outputSel.value === 'video';
+  const videoSize = () => VIDEO_RES[resSel.value] || VIDEO_RES['1080p'];
+  const totalFrames = () => Math.max(1, Math.round((parseFloat(durInp.value) || 8) * (parseFloat(fpsInp.value) || 30)));
+
+  function refreshEstimate() {
     const n = totalFrames();
-    estimateEl.textContent = `${n} frames · 4K (3840×2160) · ~${Math.ceil(n * 1.4)} MB aprox.`;
-  };
-  [durInp, fpsInp].forEach((el) => el.addEventListener('input', refreshEstimate));
-  refreshEstimate();
+    if (isVideo()) {
+      const [w, h] = videoSize();
+      estimateEl.textContent = `${n} cuadros · MP4 ${w}×${h} · ${durInp.value}s @ ${fpsInp.value}fps`;
+    } else {
+      estimateEl.textContent = `${n} frames · 4K (3840×2160) · ~${Math.ceil(n * 1.4)} MB aprox.`;
+    }
+  }
+  function syncOutputUI() {
+    const v = isVideo();
+    resWrap.style.display = v ? '' : 'none';
+    formatWrap.style.display = v ? 'none' : '';
+    goBtn.textContent = v ? '🎬 Generar Video MP4' : '📸 Generar Secuencia Splat';
+    refreshEstimate();
+  }
+  outputSel.addEventListener('change', syncOutputUI);
+  [durInp, fpsInp, resSel].forEach((el) => el.addEventListener('input', refreshEstimate));
+  presetSel.addEventListener('change', () => {
+    const d = PRESET_DUR[presetSel.value];
+    if (d) durInp.value = String(d);
+    savedSel.value = '';
+    refreshEstimate();
+  });
+  syncOutputUI();
 
   // ── Preview (Modo Presentación): endless loop driven by the host rAF ───────
   const stopPreview = () => {
@@ -294,10 +420,10 @@ export function mountCaptureEngine(ctx) {
   previewChk.addEventListener('change', () => {
     if (previewChk.checked) {
       const f = getFrame();
-      if (!f) { previewChk.checked = false; alert('Primero anclá el edificio (⇧+click sobre el suelo Maxar) para definir el centro de la órbita.'); return; }
+      if (!f) { previewChk.checked = false; noAnchor(); return; }
       animator.setFrame(f);
       animator.setPreset(presetSel.value, overrides());
-      state.previewSecs = Math.max(4, parseFloat(loopSecsInp.value) || 24);
+      state.previewSecs = Math.max(4, parseFloat(loopSecsInp.value) || 20);
       state.previewStart = performance.now();
       state.previewOn = true;
       setNavEnabled(false);
@@ -315,7 +441,7 @@ export function mountCaptureEngine(ctx) {
     if (!state.previewOn) return;
     const elapsed = (performance.now() - state.previewStart) / 1000;
     const tNow = (elapsed / state.previewSecs) % 1;          // keep phase on speed change
-    state.previewSecs = Math.max(4, parseFloat(loopSecsInp.value) || 24);
+    state.previewSecs = Math.max(4, parseFloat(loopSecsInp.value) || 20);
     state.previewStart = performance.now() - tNow * state.previewSecs * 1000;
   });
 
@@ -323,7 +449,7 @@ export function mountCaptureEngine(ctx) {
   // camera (host then skips controls.update so OrbitControls doesn't fight it).
   function tickPreview(now) {
     if (!state.previewOn) return false;
-    // Re-read the frame each tick so the orbit re-centres live if the user
+    // Re-read the frame each tick so the path re-centres live if the user
     // nudges the building (E/O · N/S · Altura · ⇧+click) while presenting.
     const f = getFrame();
     if (f) { animator.setFrame(f); animator.setPreset(presetSel.value, overrides()); }
@@ -334,13 +460,13 @@ export function mountCaptureEngine(ctx) {
 
   // ── Modal progress overlay ─────────────────────────────────────────────────
   let modal = null;
-  function showModal() {
+  function showModal(title) {
     modal = document.createElement('div');
     modal.className = 'g3d-cine-modal';
     modal.innerHTML = `
       <div class="g3d-cine-card">
-        <div class="g3d-cine-title">🎬 Generando secuencia Splat</div>
-        <div class="g3d-cine-frame" id="g3d-cine-frame">Frame 0 / 0</div>
+        <div class="g3d-cine-title">${escapeHtml(title || 'Generando…')}</div>
+        <div class="g3d-cine-frame" id="g3d-cine-frame">Cuadro 0 / 0</div>
         <div class="g3d-cine-track"><div class="g3d-cine-fill" id="g3d-cine-fill"></div></div>
         <div class="g3d-cine-sub" id="g3d-cine-sub">Preparando…</div>
         <button class="g3d-cine-cancel" id="g3d-cine-cancel">Cancelar</button>
@@ -354,85 +480,56 @@ export function mountCaptureEngine(ctx) {
   function updateModal(i, n, sub) {
     if (!modal) return;
     const pct = n ? Math.round((i / n) * 100) : 0;
-    modal.querySelector('#g3d-cine-frame').textContent = `Frame ${i} / ${n}`;
+    modal.querySelector('#g3d-cine-frame').textContent = `Cuadro ${i} / ${n}`;
     modal.querySelector('#g3d-cine-fill').style.width = pct + '%';
     if (sub != null) modal.querySelector('#g3d-cine-sub').textContent = sub;
   }
   function hideModal() { modal?.remove(); modal = null; }
 
-  // ── Deterministic frame-stepper ────────────────────────────────────────────
-  const CAP_W = 3840, CAP_H = 2160;            // 4K
-  const JPEG_Q = 0.95;
-  const PER_FRAME_TIMEOUT = 9000;              // ms; never hang on a stuck tile
-  const SETTLE_FRAMES = 3;                     // consecutive "0 pending" before grab
-  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-  const nextRAF = () => new Promise((r) => requestAnimationFrame(() => r()));
-  const toBlob = (q) => new Promise((res) => canvas.toBlob(res, 'image/jpeg', q));
-
-  async function captureSequence(presetType, frames, fps) {
-    const frame = getFrame();
-    if (!frame) { alert('Primero anclá el edificio (⇧+click sobre el suelo Maxar) para definir el centro de la cámara.'); return; }
-
+  // ── Shared deterministic frame-stepper ──────────────────────────────────────
+  // Caller configures the animator first. For each frame: force the pose, wait
+  // for the 3D Tiles of that view to fully stream in (or time out), render, then
+  // hand the freshly-rendered canvas to onFrame(i, t). Restores camera +
+  // resolution + quality on exit. Used by both the photo and video exporters.
+  const CAP_W = 3840, CAP_H = 2160, JPEG_Q = 0.95;
+  const PER_FRAME_TIMEOUT = 9000, SETTLE_FRAMES = 3;
+  async function runStepper({ frames, w, h, maxQ, title, label, onFrame }) {
     state.capturing = true;
     state.cancel = false;
     if (state.previewOn) stopPreview();
     setNavEnabled(false);
-    showModal();
-
-    animator.setFrame(frame);
-    animator.setPreset(presetType, overrides());
-
-    // Save camera/aspect to restore the live view afterwards.
+    showModal(title);
     const saved = {
       pos: camera.position.clone(), up: camera.up.clone(),
       quat: camera.quaternion.clone(), aspect: camera.aspect, fov: camera.fov,
     };
-
-    const captured = [];            // { name, data:Uint8Array }
-    const poses = [];               // per-frame camera record (ENU-local)
-    let aborted = false;
-    // "Máxima calidad en captura" lets the user navigate at a fast/low live
-    // quality while every captured frame is forced to max tile detail. Each
-    // frame then waits longer for the denser tiles to stream in.
-    const maxQ = !!maxqChk.checked;
     const perFrameTimeout = maxQ ? 16000 : PER_FRAME_TIMEOUT;
-
+    let aborted = false;
     try {
-      beginCaptureResolution(CAP_W, CAP_H);
+      beginCaptureResolution(w, h);
       if (maxQ) beginCaptureQuality?.();
       await nextRAF();
-
       for (let i = 0; i < frames; i++) {
         if (state.cancel) { aborted = true; break; }
-        const t = i / frames;       // [0,1) — for orbit this avoids a duplicate 0/360 frame
+        const t = i / frames;       // [0,1) — for a 360° orbit avoids a duplicate 0/360 frame
         animator.applyToCamera(camera, t);
         camera.updateMatrixWorld();
-
-        // Stream the 3D Tiles for THIS exact view to completion (or timeout).
-        updateModal(i, frames, 'Cargando tiles de Maxar para el cuadro…');
+        updateModal(i, frames, label + ' · cargando tiles…');
         const deadline = performance.now() + perFrameTimeout;
         let settled = 0;
         for (;;) {
           updateTiles();
           const pending = tilesPending();
-          if (pending <= 0) { if (++settled >= SETTLE_FRAMES) break; }
-          else settled = 0;
+          if (pending <= 0) { if (++settled >= SETTLE_FRAMES) break; } else settled = 0;
           if (performance.now() > deadline) break;
           if (state.cancel) { aborted = true; break; }
           await delay(16);
         }
         if (aborted) break;
-
-        // Render + read back the pixel buffer (preserveDrawingBuffer is on).
         renderFrame();
         await nextRAF();
-        const blob = await toBlob(JPEG_Q);
-        const buf = new Uint8Array(await blob.arrayBuffer());
-        const name = 'images/frame_' + String(i + 1).padStart(4, '0') + '.jpg';
-        captured.push({ name, data: buf });
-        poses.push(poseRecord(i + 1, name, t, frame));
-
-        updateModal(i + 1, frames, `Capturado · ${(buf.length / 1024 | 0)} KB`);
+        await onFrame(i, t, saved.fov);
+        updateModal(i + 1, frames, label);
         await delay(0);             // yield so the modal repaints
       }
     } catch (err) {
@@ -441,35 +538,142 @@ export function mountCaptureEngine(ctx) {
     } finally {
       if (maxQ) endCaptureQuality?.();
       endCaptureResolution();
-      // Restore the live camera so the viewport doesn't jump.
       camera.aspect = saved.aspect; camera.fov = saved.fov; camera.updateProjectionMatrix();
       camera.position.copy(saved.pos); camera.up.copy(saved.up); camera.quaternion.copy(saved.quat);
       setNavEnabled(true);
       state.capturing = false;
     }
+    return { aborted, fov: saved.fov };
+  }
 
-    if (captured.length === 0) { hideModal(); return; }
+  // ── Photo dataset (ZIP of 4K JPEGs + poses) ─────────────────────────────────
+  async function captureSequence(frames, fps) {
+    const frame = getFrame();
+    if (!frame) return noAnchor();
+    animator.setFrame(frame);
+    animator.setPreset(presetSel.value, overrides());
+    const captured = [], poses = [];
+    const { aborted, fov } = await runStepper({
+      frames, w: CAP_W, h: CAP_H, maxQ: !!maxqChk.checked,
+      title: '📸 Generando dataset Splat', label: 'Capturando',
+      onFrame: async (i, t) => {
+        const blob = await toBlob(JPEG_Q);
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        const name = 'images/frame_' + pad4(i + 1) + '.jpg';
+        captured.push({ name, data: buf });
+        poses.push(poseRecord(i + 1, name, t, frame));
+      },
+    });
+    if (!captured.length) { hideModal(); return; }
+    updateModal(captured.length, frames, 'Empaquetando ZIP…'); await delay(0);
+    const tenc = new TextEncoder();
+    const fmt = formatSel.value;
+    if (fmt === 'transforms' || fmt === 'both')
+      captured.push({ name: 'transforms.json', data: tenc.encode(JSON.stringify(buildTransformsJson(CAP_W, CAP_H, fov, poses), null, 2)) });
+    if (fmt === 'cameras' || fmt === 'both')
+      captured.push({ name: 'cameras.json', data: tenc.encode(JSON.stringify(buildCamerasJson(presetSel.value, fps, captured.length, CAP_W, CAP_H, fov, frame, poses), null, 2)) });
+    captured.push({ name: 'README.txt', data: tenc.encode(README) });
+    downloadBlob(zipStore(captured), `bizual-splat-${stampNow()}.zip`);
+    updateModal(captured.length, frames, aborted ? 'Cancelado — ZIP parcial descargado.' : '✅ ZIP descargado.');
+    await delay(1400); hideModal();
+  }
 
-    updateModal(captured.length, frames, 'Empaquetando ZIP…');
-    await delay(0);
-    const stamp = stampNow();
-    const enc = new TextEncoder();
-    const fov = saved.fov;                 // vertical FOV used during capture
-    const fmt = formatSel.value;           // 'transforms' | 'cameras' | 'both'
-    if (fmt === 'transforms' || fmt === 'both') {
-      const tj = buildTransformsJson(CAP_W, CAP_H, fov, poses);
-      captured.push({ name: 'transforms.json', data: enc.encode(JSON.stringify(tj, null, 2)) });
+  // ── Marketing video (MP4 H.264 via WebCodecs + mp4-muxer) ───────────────────
+  async function captureVideo(frames, fps) {
+    const frame = getFrame();
+    if (!frame) return noAnchor();
+    const [w, h] = videoSize();
+    if (!('VideoEncoder' in window) || !('VideoFrame' in window))
+      return captureVideoFallback(frames, fps, w, h, frame);
+    animator.setFrame(frame);
+    animator.setPreset(presetSel.value, overrides());
+    let Muxer, ArrayBufferTarget;
+    try {
+      ({ Muxer, ArrayBufferTarget } = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5/+esm'));
+    } catch (e) {
+      console.warn('[video] mp4-muxer load failed → WebM fallback', e);
+      return captureVideoFallback(frames, fps, w, h, frame);
     }
-    if (fmt === 'cameras' || fmt === 'both') {
-      const meta = buildCamerasJson(presetType, fps, captured.length, CAP_W, CAP_H, fov, frame, poses);
-      captured.push({ name: 'cameras.json', data: enc.encode(JSON.stringify(meta, null, 2)) });
+    const bitrate = pickBitrate(w, h);
+    const codec = await chooseH264Codec(w, h, bitrate, fps);
+    const target = new ArrayBufferTarget();
+    const muxer = new Muxer({ target, video: { codec: 'avc', width: w, height: h }, fastStart: 'in-memory' });
+    let encErr = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (e) => { encErr = e; console.error('[video] encoder error', e); },
+    });
+    encoder.configure({ codec, width: w, height: h, bitrate, framerate: fps });
+    const usPerFrame = 1e6 / fps;
+    const gop = Math.max(1, Math.round(fps * 2));
+    const { aborted } = await runStepper({
+      frames, w, h, maxQ: !!maxqChk.checked,
+      title: '🎬 Codificando video MP4', label: 'Codificando',
+      onFrame: async (i) => {
+        if (encErr) throw encErr;
+        const vf = new VideoFrame(canvas, { timestamp: Math.round(i * usPerFrame), duration: Math.round(usPerFrame) });
+        encoder.encode(vf, { keyFrame: i % gop === 0 });
+        vf.close();
+        while (encoder.encodeQueueSize > 6) await delay(8);   // backpressure
+      },
+    });
+    try {
+      updateModal(frames, frames, 'Finalizando MP4…'); await delay(0);
+      await encoder.flush();
+      muxer.finalize();
+      downloadBlob(new Blob([target.buffer], { type: 'video/mp4' }), `bizual-video-${stampNow()}.mp4`);
+      updateModal(frames, frames, aborted ? 'Cancelado — MP4 parcial.' : `✅ MP4 ${w}×${h} descargado.`);
+    } catch (e) {
+      console.error('[video] finalize error', e);
+      alert('Error al finalizar el MP4: ' + e.message);
     }
-    captured.push({ name: 'README.txt', data: enc.encode(README) });
-    const zip = zipStore(captured);
-    downloadBlob(zip, `bizual-splat-${stamp}.zip`);
-    updateModal(captured.length, frames, aborted ? 'Cancelado — ZIP parcial descargado.' : '✅ Listo — ZIP descargado.');
-    await delay(1400);
-    hideModal();
+    await delay(1400); hideModal();
+  }
+
+  // WebM fallback for browsers without WebCodecs (records the live viewport).
+  async function captureVideoFallback(frames, fps, w, h, frame) {
+    if (!('MediaRecorder' in window) || !canvas.captureStream) {
+      alert('Tu navegador no soporta export de video. Usá Chrome/Edge, o exportá Fotos.'); return;
+    }
+    alert('Sin WebCodecs: se grabará WebM a la resolución actual del viewport. Para MP4 usá Chrome/Edge.');
+    animator.setFrame(frame);
+    animator.setPreset(presetSel.value, overrides());
+    state.capturing = true; state.cancel = false;
+    if (state.previewOn) stopPreview();
+    setNavEnabled(false); showModal('🎬 Grabando video (WebM)');
+    const saved = { pos: camera.position.clone(), up: camera.up.clone(), quat: camera.quaternion.clone() };
+    const maxQ = !!maxqChk.checked; if (maxQ) beginCaptureQuality?.();
+    const stream = canvas.captureStream(0);
+    const track = stream.getVideoTracks()[0];
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+    const chunks = [];
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: pickBitrate(w, h) });
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    let aborted = false;
+    try {
+      rec.start();
+      const tout = maxQ ? 16000 : 9000;
+      for (let i = 0; i < frames; i++) {
+        if (state.cancel) { aborted = true; break; }
+        animator.applyToCamera(camera, i / frames); camera.updateMatrixWorld();
+        const deadline = performance.now() + tout; let settled = 0;
+        for (;;) { updateTiles(); const p = tilesPending(); if (p <= 0) { if (++settled >= 3) break; } else settled = 0; if (performance.now() > deadline) break; if (state.cancel) { aborted = true; break; } await delay(16); }
+        if (aborted) break;
+        renderFrame(); await nextRAF();
+        track.requestFrame?.();
+        updateModal(i + 1, frames, 'Grabando…');
+        await delay(Math.max(8, 1000 / fps));
+      }
+    } finally {
+      rec.stop();
+      await new Promise((r) => { rec.onstop = r; });
+      if (maxQ) endCaptureQuality?.();
+      camera.position.copy(saved.pos); camera.up.copy(saved.up); camera.quaternion.copy(saved.quat);
+      setNavEnabled(true); state.capturing = false;
+    }
+    if (chunks.length) downloadBlob(new Blob(chunks, { type: 'video/webm' }), `bizual-video-${stampNow()}.webm`);
+    updateModal(frames, frames, aborted ? 'Cancelado — WebM parcial.' : '✅ WebM descargado.');
+    await delay(1400); hideModal();
   }
 
   // Per-frame pose in the local ENU frame (metres relative to the anchor).
@@ -488,13 +692,96 @@ export function mountCaptureEngine(ctx) {
     };
   }
 
+  // ── Saved-animations library (localStorage + portable JSON) ─────────────────
+  const LS_ANIMS = 'bizual_g3d_animations';
+  const loadSaved = () => { try { return JSON.parse(localStorage.getItem(LS_ANIMS) || '[]'); } catch { return []; } };
+  const saveSavedList = (list) => localStorage.setItem(LS_ANIMS, JSON.stringify(list));
+  const renderSavedOptions = () => {
+    const list = loadSaved();
+    savedSel.innerHTML = '<option value="">— elegir —</option>' +
+      list.map((a, i) => `<option value="${i}">${escapeHtml(a.name)}</option>`).join('');
+  };
+  const currentConfig = (name) => ({
+    name: name || (PRESETS.find((p) => p.v === presetSel.value)?.label || presetSel.value),
+    preset: presetSel.value,
+    radius: parseFloat(radiusInp.value) || null,
+    height: parseFloat(heightInp.value) || null,
+    output: outputSel.value, resolution: resSel.value,
+    durationSec: parseFloat(durInp.value) || 16, fps: parseFloat(fpsInp.value) || 30,
+    posesFormat: formatSel.value,
+  });
+  const applyConfig = (a) => {
+    if (!a) return;
+    if (a.preset) presetSel.value = a.preset;
+    radiusInp.value = a.radius != null ? a.radius : '';
+    heightInp.value = a.height != null ? a.height : '';
+    if (a.output) outputSel.value = a.output;
+    if (a.resolution) resSel.value = a.resolution;
+    if (a.durationSec) durInp.value = a.durationSec;
+    if (a.fps) fpsInp.value = a.fps;
+    if (a.posesFormat) formatSel.value = a.posesFormat;
+    syncOutputUI();
+    if (state.previewOn) animator.setPreset(presetSel.value, overrides());
+  };
+  savedSel.addEventListener('change', () => {
+    const idx = parseInt(savedSel.value, 10);
+    if (Number.isInteger(idx)) applyConfig(loadSaved()[idx]);
+  });
+  $('g3d-cine-save').addEventListener('click', () => {
+    const name = (prompt('Nombre de la animación:', currentConfig().name) || '').trim();
+    if (!name) return;
+    const list = loadSaved();
+    const cfg = currentConfig(name);
+    const ex = list.findIndex((a) => a.name === name);
+    if (ex >= 0) list[ex] = cfg; else list.push(cfg);
+    saveSavedList(list); renderSavedOptions();
+    savedSel.value = String(loadSaved().findIndex((a) => a.name === name));
+  });
+  $('g3d-cine-del').addEventListener('click', () => {
+    const idx = parseInt(savedSel.value, 10);
+    if (!Number.isInteger(idx)) return;
+    const list = loadSaved(); list.splice(idx, 1); saveSavedList(list); renderSavedOptions();
+  });
+  $('g3d-cine-export').addEventListener('click', () => {
+    const data = { generator: 'Bizual Cinematic Animations', version: 1, animations: loadSaved() };
+    downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `bizual-animaciones-${stampNow()}.json`);
+  });
+  const importFile = $('g3d-cine-importfile');
+  $('g3d-cine-import').addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', async () => {
+    const f = importFile.files?.[0]; if (!f) return;
+    try {
+      const data = JSON.parse(await f.text());
+      const incoming = Array.isArray(data) ? data : (data.animations || []);
+      if (!incoming.length) { alert('El JSON no tiene animaciones.'); return; }
+      const list = loadSaved();
+      for (const a of incoming) {
+        if (!a || !a.preset) continue;
+        const i = list.findIndex((x) => x.name === a.name);
+        if (i >= 0) list[i] = a; else list.push(a);
+      }
+      saveSavedList(list); renderSavedOptions();
+      alert(`Importadas ${incoming.length} animación(es).`);
+    } catch (e) { alert('JSON inválido: ' + e.message); }
+    importFile.value = '';
+  });
+  renderSavedOptions();
+
+  // ── Generate button: branch on output type ─────────────────────────────────
   goBtn.addEventListener('click', () => {
     if (state.capturing) return;
     const n = totalFrames();
-    const fps = parseFloat(fpsInp.value) || 24;
-    if (n > 240 && !confirm(`Vas a capturar ${n} cuadros en 4K. Eso puede usar bastante memoria (~${Math.ceil(n * 1.4)} MB) y tardar varios minutos. ¿Continuar?`)) return;
-    if (!confirm(`Generar secuencia "${presetSel.options[presetSel.selectedIndex].text}" → ${n} cuadros @ ${fps} fps en 4K.\n\nNo muevas la ventana durante el proceso. ¿Empezar?`)) return;
-    captureSequence(presetSel.value, n, fps);
+    const fps = parseFloat(fpsInp.value) || 30;
+    const label = PRESETS.find((p) => p.v === presetSel.value)?.label || presetSel.value;
+    if (isVideo()) {
+      const [w, h] = videoSize();
+      if (!confirm(`Generar video MP4 "${label}" → ${w}×${h}, ${durInp.value}s @ ${fps}fps (${n} cuadros).\n\nNo muevas la ventana. Puede tardar varios minutos. ¿Empezar?`)) return;
+      captureVideo(n, fps);
+    } else {
+      if (n > 240 && !confirm(`Vas a capturar ${n} cuadros en 4K (~${Math.ceil(n * 1.4)} MB). Puede tardar varios minutos. ¿Continuar?`)) return;
+      if (!confirm(`Generar dataset "${label}" → ${n} cuadros en 4K.\n\nNo muevas la ventana. ¿Empezar?`)) return;
+      captureSequence(n, fps);
+    }
   });
 
   return {
@@ -582,6 +869,36 @@ cameras.json           — (opcional) variante Bizual: posición/target/up por
                          cuadro en ENU local + intrínsecos. Útil si preferís
                          reconstruir las extrínsecas con lookAt(pos, target, up).
 `;
+
+// Target H.264 bitrate by resolution (Mbps) — generous for crisp marketing.
+function pickBitrate(w, h) {
+  const px = w * h;
+  if (px >= 3840 * 2160 * 0.9) return 55_000_000;
+  if (px >= 2560 * 1440 * 0.9) return 28_000_000;
+  if (px >= 1920 * 1080 * 0.9) return 16_000_000;
+  return 8_000_000;
+}
+
+// Pick a supported H.264 codec string for the target resolution. High profile
+// at the level that covers the pixel count, falling back to Main/Baseline.
+async function chooseH264Codec(w, h, bitrate, fps) {
+  const cands = h >= 2160 ? ['avc1.640033', 'avc1.640032', 'avc1.42E033']
+              : h >= 1440 ? ['avc1.640032', 'avc1.640028', 'avc1.42E032']
+              :             ['avc1.640028', 'avc1.4D4028', 'avc1.42E028'];
+  if (typeof VideoEncoder !== 'undefined' && VideoEncoder.isConfigSupported) {
+    for (const c of cands) {
+      try {
+        const s = await VideoEncoder.isConfigSupported({ codec: c, width: w, height: h, bitrate, framerate: fps });
+        if (s && s.supported) return c;
+      } catch { /* try next */ }
+    }
+  }
+  return cands[0];
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
 
 function stampNow() {
   const d = new Date();

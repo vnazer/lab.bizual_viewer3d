@@ -1020,6 +1020,19 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   cursor: pointer;
 }
 .g3d-cine-cancel:hover { background: rgba(220, 60, 60, 0.5); color: #fff; }
+.g3d-cine-divider {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.4);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 8px; margin-top: 2px;
+}
+.g3d-cine-lib { display: flex; gap: 5px; flex-wrap: wrap; }
+.g3d-cine-lib button {
+  flex: 1; min-width: 0; padding: 5px 6px; border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.8); font-size: 10px; cursor: pointer; transition: all 150ms;
+}
+.g3d-cine-lib button:hover { background: rgba(40, 90, 200, 0.6); color: #fff; }
 .g3d-attribution {
   position: absolute;
   bottom: 4px;
