@@ -1142,6 +1142,14 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           for (const m of mats) {
             m.depthTest = true;
             m.depthWrite = true;
+            // Clamp envMap influence on the building. The Google 3D panel runs
+            // with bumped exposure + HemisphereLight fill so Maxar terrain
+            // stays bright on the shadow side, but the building's PBR
+            // materials would otherwise pick up the full bake and blow out
+            // (especially white walls / glass). 0.6 keeps the realistic
+            // neighbourhood reflection without turning the façade into a
+            // light source.
+            if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.6;
           }
         }
         c.renderOrder = 0;
@@ -1447,7 +1455,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _svModelRoot.traverse((o) => {
         if (!o.isMesh || !o.material) return;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (const m of mats) { m.depthTest = true; m.depthWrite = true; }
+        for (const m of mats) {
+          m.depthTest = true;
+          m.depthWrite = true;
+          // Same clamp as the main panel — keep the building from blowing
+          // out against the bright Street View backdrop.
+          if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.6;
+        }
       });
 
       // Camera in the local frame: at origin, looking toward -Z (compass
