@@ -235,9 +235,16 @@ export function mountCaptureEngine(ctx) {
         <label title="Duración de la secuencia a capturar, en segundos.">Duración<input type="number" id="g3d-cine-dur" min="1" max="120" step="1" value="8"></label>
         <label title="Cuadros por segundo del dataset.">FPS<input type="number" id="g3d-cine-fps" min="6" max="60" step="1" value="24"></label>
       </div>
+      <label title="Formato de las poses dentro del ZIP. Nerfstudio/COLMAP (transforms.json) es el estándar que ingiere PlayCanvas para Gaussian Splatting.">📐 Poses
+        <select id="g3d-cine-format" class="g3d-cine-select">
+          <option value="transforms">Nerfstudio (transforms.json)</option>
+          <option value="cameras">Bizual (cameras.json)</option>
+          <option value="both">Ambos</option>
+        </select>
+      </label>
       <div class="g3d-hint" id="g3d-cine-estimate">192 frames · 4K (3840×2160)</div>
       <button id="g3d-cine-go" class="g3d-cine-go">🎬 Generar Secuencia Splat</button>
-      <div class="g3d-hint">Captura cuadro-a-cuadro esperando a que cada vista de los tiles de Maxar termine de cargar. Salida: un ZIP con los JPG 4K + <b>cameras.json</b> (poses) para Gaussian Splatting.</div>
+      <div class="g3d-hint">Captura cuadro-a-cuadro esperando a que cada vista de los tiles de Maxar termine de cargar. Salida: un ZIP con los JPG 4K + las poses de cámara (<b>transforms.json</b>, Nerfstudio/COLMAP) para Gaussian Splatting.</div>
     </div>`;
   const saveBtn = ctx.hudParent.querySelector('#g3d-save');
   ctx.hudParent.insertBefore(section, saveBtn || null);
@@ -251,6 +258,7 @@ export function mountCaptureEngine(ctx) {
   const durInp = $('g3d-cine-dur');
   const fpsInp = $('g3d-cine-fps');
   const estimateEl = $('g3d-cine-estimate');
+  const formatSel = $('g3d-cine-format');
   const goBtn = $('g3d-cine-go');
 
   const overrides = () => {
@@ -428,9 +436,18 @@ export function mountCaptureEngine(ctx) {
     updateModal(captured.length, frames, 'Empaquetando ZIP…');
     await delay(0);
     const stamp = stampNow();
-    const meta = buildCamerasJson(presetType, fps, captured.length, CAP_W, CAP_H, camera.fov, frame, poses);
-    captured.push({ name: 'cameras.json', data: new TextEncoder().encode(JSON.stringify(meta, null, 2)) });
-    captured.push({ name: 'README.txt', data: new TextEncoder().encode(README) });
+    const enc = new TextEncoder();
+    const fov = saved.fov;                 // vertical FOV used during capture
+    const fmt = formatSel.value;           // 'transforms' | 'cameras' | 'both'
+    if (fmt === 'transforms' || fmt === 'both') {
+      const tj = buildTransformsJson(CAP_W, CAP_H, fov, poses);
+      captured.push({ name: 'transforms.json', data: enc.encode(JSON.stringify(tj, null, 2)) });
+    }
+    if (fmt === 'cameras' || fmt === 'both') {
+      const meta = buildCamerasJson(presetType, fps, captured.length, CAP_W, CAP_H, fov, frame, poses);
+      captured.push({ name: 'cameras.json', data: enc.encode(JSON.stringify(meta, null, 2)) });
+    }
+    captured.push({ name: 'README.txt', data: enc.encode(README) });
     const zip = zipStore(captured);
     downloadBlob(zip, `bizual-splat-${stamp}.zip`);
     updateModal(captured.length, frames, aborted ? 'Cancelado — ZIP parcial descargado.' : '✅ Listo — ZIP descargado.');
@@ -491,17 +508,62 @@ function buildCamerasJson(preset, fps, count, w, h, fovYDeg, frame, poses) {
   };
 }
 
+// Industry-standard Nerfstudio / COLMAP transforms.json for the PlayCanvas
+// Gaussian-Splatting pipeline. Per frame we emit a camera-to-world 4x4 matrix
+// in the local ENU frame (metres) around the anchor, in OpenGL convention
+// (camera looks down -Z, +Y up, +X right). three.js' camera basis IS OpenGL,
+// so building the matrix straight from Matrix4.lookAt() needs NO axis flip —
+// applying the COLMAP right-down-forward inversion here would render the path
+// upside-down in the trainer. Intrinsics come from the fixed 4K + vertical FOV.
+function buildTransformsJson(w, h, fovYDeg, poses) {
+  const fovY = fovYDeg * DEG2RAD;
+  const fl = 0.5 * h / Math.tan(0.5 * fovY);     // square pixels → fl_x === fl_y
+  const r6 = (x) => +x.toFixed(6);
+  const eye = new THREE.Vector3(), tgt = new THREE.Vector3(), up = new THREE.Vector3();
+  const m = new THREE.Matrix4();
+  const frames = poses.map((p) => {
+    eye.fromArray(p.position); tgt.fromArray(p.target); up.fromArray(p.up);
+    m.identity();
+    m.lookAt(eye, tgt, up);    // sets the 3x3 camera basis [right, up, back]
+    m.setPosition(eye);        // translation column = camera position (ENU)
+    const e = m.elements;      // three stores column-major; emit row-major 4x4
+    return {
+      file_path: p.file,
+      transform_matrix: [
+        [r6(e[0]), r6(e[4]), r6(e[8]),  r6(e[12])],
+        [r6(e[1]), r6(e[5]), r6(e[9]),  r6(e[13])],
+        [r6(e[2]), r6(e[6]), r6(e[10]), r6(e[14])],
+        [0, 0, 0, 1],
+      ],
+    };
+  });
+  return {
+    camera_model: 'PINHOLE',
+    w, h,
+    fl_x: r6(fl), fl_y: r6(fl),
+    cx: w / 2, cy: h / 2,
+    k1: 0, k2: 0, p1: 0, p2: 0,           // pinhole: no distortion
+    aabb_scale: 16,
+    frames,
+  };
+}
+
 const README =
 `Bizual — Cinematic Capture (dataset para Gaussian Splatting)
 ============================================================
-images/frame_XXXX.jpg  — cuadros 4K en orden de trayectoria.
-cameras.json           — poses por cuadro (posición, target, up) en el frame
-                         ENU local (metros) relativo al anchor del edificio,
-                         más los intrínsecos de cámara (pinhole).
+images/frame_XXXX.jpg  — cuadros 4K (3840x2160) en orden de trayectoria.
 
-Para PlayCanvas / gsplat: construí las extrínsecas con lookAt(position, target,
-up) por cuadro. Los intrínsecos (fl_x, fl_y, cx, cy, width, height) están en
-cameras.json. Pixeles cuadrados, sin distorsión.
+transforms.json        — formato estándar Nerfstudio / COLMAP. Intrínsecos
+                         (camera_model PINHOLE, fl_x, fl_y, cx, cy, w, h) +
+                         "frames": [{ file_path, transform_matrix }]. Cada
+                         transform_matrix es camera-to-world 4x4 (row-major) en
+                         el frame ENU local (metros), convención OpenGL (cámara
+                         mira -Z, +Y arriba). Carga directa en PlayCanvas / gsplat
+                         o nerfstudio (ns-train). Sin distorsión.
+
+cameras.json           — (opcional) variante Bizual: posición/target/up por
+                         cuadro en ENU local + intrínsecos. Útil si preferís
+                         reconstruir las extrínsecas con lookAt(pos, target, up).
 `;
 
 function stampNow() {
