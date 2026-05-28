@@ -808,7 +808,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   //     captured environment and matches the main render.
   //   • 256² per face is enough for env IBL; bigger looks identical after
   //     PMREM filtering and costs a lot more VRAM.
-  const _envCubeRT = new THREE.WebGLCubeRenderTarget(256, {
+  const _envCubeRT = new THREE.WebGLCubeRenderTarget(512, {
     generateMipmaps: false,
     type: THREE.HalfFloatType,
   });
@@ -1150,6 +1150,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
             // neighbourhood reflection without turning the façade into a
             // light source.
             if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.6;
+            // Roughness floor on reflective materials. Mirror-sharp glass
+            // (roughness ≈ 0) reflecting the high-frequency Maxar env map
+            // shimmers/flickers as the camera micro-moves under OrbitControls
+            // damping — classic specular aliasing. A small floor blurs the
+            // reflection just enough to kill the flicker without making the
+            // glass look matte.
+            if (m.roughness !== undefined && m.roughness < 0.12) m.roughness = 0.12;
           }
         }
         c.renderOrder = 0;
@@ -1458,9 +1465,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         for (const m of mats) {
           m.depthTest = true;
           m.depthWrite = true;
-          // Same clamp as the main panel — keep the building from blowing
-          // out against the bright Street View backdrop.
+          // Same clamps as the main panel — prevent blow-out and kill the
+          // specular-aliasing flicker on sharp glass.
           if (m.envMapIntensity !== undefined) m.envMapIntensity = 0.6;
+          if (m.roughness !== undefined && m.roughness < 0.12) m.roughness = 0.12;
         }
       });
 

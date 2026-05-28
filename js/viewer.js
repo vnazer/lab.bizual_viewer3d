@@ -552,7 +552,7 @@ async function populateModels() {
     opt.textContent = label;
     select.appendChild(opt);
   });
-  const DEFAULT_MODEL = 'Edificio_01_vacio_sinplanters.glb';
+  const DEFAULT_MODEL = 'Edificio_01_exterior_med_v6.glb';
   const preferred = Array.from(select.options).find(
     (o) => o.textContent === DEFAULT_MODEL || o.value.endsWith('/' + DEFAULT_MODEL)
   );
@@ -2306,7 +2306,7 @@ if (addressInput) {
   // Google 3D dialog, then reload). Plain field + OSM fallback otherwise.
   const _gkey = localStorage.getItem('bizual_google_maps_key') || '';
   if (_gkey) {
-    import('./places-autocomplete.js?v=20260525')
+    import('./places-autocomplete.js?v=20260528h')
       .then(({ initAddressAutocomplete }) =>
         initAddressAutocomplete(addressInput, _gkey, (coords) => {
           ls.set('proyecto_direccion', coords.display);
@@ -2358,7 +2358,7 @@ window.__envHandleAccess = () => _envHandle;
 function _modelForEnv() {
   if (!currentModelUrl) return null;
   return /tipologia/i.test(currentModelUrl)
-    ? currentModelUrl.replace(/tipologia[^/]*\.glb/i, 'Edificio_01_exterior.glb')
+    ? currentModelUrl.replace(/tipologia[^/]*\.glb/i, 'Edificio_01_exterior_med_v6.glb')
     : currentModelUrl;
 }
 
@@ -2389,13 +2389,13 @@ $('btn-show-g3d')?.addEventListener('click', async () => {
   }
   try {
     // Prefer the exact coords from a Places pick; fall back to OSM geocoding.
-    const pa = await import('./places-autocomplete.js?v=20260525');
+    const pa = await import('./places-autocomplete.js?v=20260528h');
     let coords = pa.resolvePickedCoords(addr);
     if (!coords) {
       const mb = await import('./mapbox-env.js?v=20260519');
       coords = await mb.geocodeAddress(addr);
     }
-    const g3d = await import('./env-google3d.js?v=20260528h');
+    const g3d = await import('./env-google3d.js?v=20260528i');
     _envHandleG3d = await g3d.openGoogle3DPanel(coords, _modelForEnv());
   } catch (err) {
     console.error('[g3d] open failed:', err);

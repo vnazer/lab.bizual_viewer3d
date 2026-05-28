@@ -60,11 +60,28 @@ export async function initAddressAutocomplete(inputEl, apiKey, onPick) {
   // after the legacy Places widgets were sunset).
   if (places.PlaceAutocompleteElement) {
     try {
+      const prefill = (inputEl.value || '').trim();
       const pac = new places.PlaceAutocompleteElement();
       pac.id = 'gmp-address';
       pac.style.width = '100%';
       inputEl.style.display = 'none';
       inputEl.insertAdjacentElement('afterend', pac);
+      // Carry the saved project address into the new element. The component
+      // replaces the original <input> with its own, so the pre-loaded value
+      // (ls.proyecto_direccion) would otherwise vanish on init. The inner
+      // <input> isn't in shadow DOM in current versions, but it mounts a
+      // tick later — poll briefly until it exists, then seed it.
+      if (prefill) {
+        let tries = 0;
+        const seed = () => {
+          const inner = pac.querySelector('input');
+          if (inner) { inner.value = prefill; return true; }
+          return false;
+        };
+        if (!seed()) {
+          const iv = setInterval(() => { if (seed() || ++tries > 30) clearInterval(iv); }, 100);
+        }
+      }
       const handler = async (e) => {
         const place = e.placePrediction ? e.placePrediction.toPlace() : e.place;
         if (!place) return;
