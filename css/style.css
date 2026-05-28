@@ -888,6 +888,7 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   transition: all 150ms;
 }
 .g3d-btn-grid button:hover { background: rgba(40, 90, 200, 0.6); color: #fff; }
+.g3d-btn-grid button.playing { background: rgba(40, 90, 200, 0.85); color: #fff; border-color: rgba(120, 170, 255, 0.6); }
 .g3d-check-row { display: flex; gap: 16px; }
 .g3d-check-row label {
   display: flex; align-items: center; gap: 6px;

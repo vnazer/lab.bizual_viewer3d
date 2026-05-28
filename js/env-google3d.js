@@ -411,6 +411,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sE = parseFloat(localStorage.getItem('bizual_g3d_offset_east')  || 0);
   const sN = parseFloat(localStorage.getItem('bizual_g3d_offset_north') || 0);
   const sS = parseFloat(localStorage.getItem('bizual_g3d_scale') || 1);
+  // Day-night: hour 0-24 (shared with the lab via bizual_lab_sun_hour) and the
+  // animation speed (simulated hours advanced per real second).
+  const sH = (() => {
+    const v = parseFloat(localStorage.getItem('bizual_lab_sun_hour'));
+    return Number.isFinite(v) ? ((v % 24) + 24) % 24 : 12;
+  })();
+  const sSpd = parseFloat(localStorage.getItem('bizual_g3d_sun_speed') || '3');
   // bizual_g3d_calidad: 1-10 scale where 10 = maximum detail. The old
   // bizual_g3d_quality key stored the raw errorTarget (inverted semantics:
   // lower = more detail), which confused the slider direction. We migrate
@@ -446,6 +453,10 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // Format helpers for slider display text.
   const fmtEW = (v) => Math.abs(v).toFixed(1) + ' m ' + (v >= 0 ? 'E' : 'O');
   const fmtNS = (v) => Math.abs(v).toFixed(1) + ' m ' + (v >= 0 ? 'N' : 'S');
+  const fmtHour = (h) => {
+    const total = (Math.round((((h % 24) + 24) % 24) * 60) % 1440 + 1440) % 1440;
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  };
   panel.innerHTML = `
     <div class="g3d-header">
       <div class="g3d-title">
@@ -550,6 +561,31 @@ export async function openGoogle3DPanel(coords, modelUrl) {
             <label><input type="checkbox" id="g3d-hdri" checked> HDRI</label>
             <label title="Sombras del sol — el shadow camera no escala bien a coordenadas ECEF"><input type="checkbox" id="g3d-shadows"> Sombras</label>
           </div>
+        </div>
+      </details>
+
+      <details class="g3d-sec" open>
+        <summary>☀️ Sol &amp; día-noche</summary>
+        <div class="g3d-sec-body">
+          <label title="Hora del día. Mueve el sol y reilumina el modelo (sol, cielo y rebote de luz).">🕐 Hora
+            <input type="range" id="g3d-sun-hour" min="0" max="24" step="0.1" value="${sH}">
+            <span id="g3d-sun-hour-val">${fmtHour(sH)}</span>
+          </label>
+          <div class="g3d-btn-grid">
+            <button id="g3d-sun-play" title="Reproduce el ciclo del día sobre el modelo.">▶︎ Animar día</button>
+            <button id="g3d-sun-now" title="Usa la hora actual de tu reloj.">🕒 Ahora</button>
+          </div>
+          <div class="g3d-btn-grid">
+            <button id="g3d-sun-dawn" title="Amanecer">🌅 06:00</button>
+            <button id="g3d-sun-noon" title="Mediodía">☀️ 12:00</button>
+            <button id="g3d-sun-dusk" title="Atardecer">🌇 18:00</button>
+            <button id="g3d-sun-night" title="Noche">🌙 00:00</button>
+          </div>
+          <label title="Velocidad de la animación: horas simuladas por cada segundo real.">⏩ Velocidad
+            <input type="range" id="g3d-sun-speed" min="0.5" max="12" step="0.5" value="${sSpd}">
+            <span id="g3d-sun-speed-val">${sSpd.toFixed(1)}×</span>
+          </label>
+          <div class="g3d-hint">El ciclo se nota sobre el modelo (sol, cielo y rebote de luz). La textura de Maxar mantiene su iluminación diurna horneada.</div>
         </div>
       </details>
 
@@ -1020,6 +1056,96 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // for the first couple of seconds and the shadow side.
   const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4a4a55, 0.45);
   scene.add(hemiLight);
+
+  // ─── Día / noche: hora del sol que reilumina el modelo ───────────────────
+  // applyG3dSunHour drives, from a single hour-of-day value, the directional
+  // sun (direction/intensity/colour), the hemisphere fill, the global IBL
+  // intensity (scene.environmentIntensity — the main thing keeping the model
+  // lit, since the env map is baked from bright daylight tiles) and the
+  // sky-dome gradient. So the whole model reads day → golden → night as the
+  // hour advances. The animation loop calls it every frame while playing.
+  let _sunHour    = sH;
+  let _sunPlaying = false;
+  let _sunSpeed   = Number.isFinite(sSpd) ? sSpd : 3; // sim-hours / real second
+  let _sunClock   = 0;                                // perf.now() of last tick
+  const _skyDayTop = new THREE.Color(0x4d8fcf), _skyDayBot = new THREE.Color(0xeaf4fb);
+  const _skyNgtTop = new THREE.Color(0x070b18), _skyNgtBot = new THREE.Color(0x141a30);
+  const _hemiNight = new THREE.Color(0x223046), _hemiDay = new THREE.Color(0xffffff);
+  const _skySunTmp = new THREE.Color();
+
+  function applyG3dSunHour(hour) {
+    _sunHour = ((hour % 24) + 24) % 24;
+    const p = getSunParams(_sunHour);
+    const dir = getSunDirectionECEF(lat, lon, p.azimut, p.elevation);
+    sunLight.position.copy(dir.multiplyScalar(1e7));
+    sunLight.color.setHex(p.sunColor);
+    sunLight.intensity = p.isNight ? 0 : Math.min(1.5, p.sunIntensity);
+    sunLight.visible   = !p.isNight;
+    // 0 at/below the horizon → 1 at high sun. The single "how bright is it" term.
+    const day  = THREE.MathUtils.clamp((p.elevation + 6) / 50, 0, 1);
+    const dayS = day * day * (3 - 2 * day);            // smoothstep
+    // Hemisphere fill: faint cool moon-fill at night, full sky bounce by day.
+    hemiLight.intensity = 0.05 + 0.45 * dayS;
+    hemiLight.color.copy(_hemiNight).lerp(_hemiDay, dayS);
+    // Global IBL dimmer. Clamp ≤1 so midday keeps the calibrated white-wall
+    // exposure (see the envMapIntensity-clamp fix); floor at 0.05 so night
+    // isn't pure black. No-op on three builds without environmentIntensity.
+    if ('environmentIntensity' in scene)
+      scene.environmentIntensity = THREE.MathUtils.clamp(p.envIntensity, 0.05, 1);
+    // Sky dome: lerp night→day, then warm the lower band during golden hour.
+    skySphere.material.uniforms.topColor.value.copy(_skyNgtTop).lerp(_skyDayTop, dayS);
+    skySphere.material.uniforms.bottomColor.value.copy(_skyNgtBot).lerp(_skyDayBot, dayS);
+    if (p.isGoldenHour)
+      skySphere.material.uniforms.bottomColor.value.lerp(_skySunTmp.setHex(p.sunColor), 0.45);
+  }
+
+  function _syncSunUI() {
+    const s = document.getElementById('g3d-sun-hour');
+    const v = document.getElementById('g3d-sun-hour-val');
+    if (s) s.value = String(_sunHour);
+    if (v) v.textContent = fmtHour(_sunHour);
+  }
+
+  function _setSunPlaying(on) {
+    _sunPlaying = on;
+    _sunClock = 0; // reset the delta baseline so the first frame doesn't jump
+    const b = document.getElementById('g3d-sun-play');
+    if (b) { b.textContent = on ? '⏸ Pausar' : '▶︎ Animar día'; b.classList.toggle('playing', on); }
+    if (!on) localStorage.setItem('bizual_lab_sun_hour', String(_sunHour));
+  }
+
+  applyG3dSunHour(_sunHour);
+
+  // Wiring — the panel DOM already exists (appended above).
+  const _sunInp = document.getElementById('g3d-sun-hour');
+  _sunInp?.addEventListener('input', (e) => {
+    if (_sunPlaying) _setSunPlaying(false);
+    applyG3dSunHour(parseFloat(e.target.value));
+    document.getElementById('g3d-sun-hour-val').textContent = fmtHour(_sunHour);
+  });
+  _sunInp?.addEventListener('change', () => localStorage.setItem('bizual_lab_sun_hour', String(_sunHour)));
+
+  const _spdInp = document.getElementById('g3d-sun-speed');
+  _spdInp?.addEventListener('input', (e) => {
+    _sunSpeed = parseFloat(e.target.value);
+    document.getElementById('g3d-sun-speed-val').textContent = _sunSpeed.toFixed(1) + '×';
+  });
+  _spdInp?.addEventListener('change', () => localStorage.setItem('bizual_g3d_sun_speed', String(_sunSpeed)));
+
+  document.getElementById('g3d-sun-play')?.addEventListener('click', () => _setSunPlaying(!_sunPlaying));
+
+  const _jumpSun = (h) => {
+    if (_sunPlaying) _setSunPlaying(false);
+    applyG3dSunHour(h); _syncSunUI();
+    localStorage.setItem('bizual_lab_sun_hour', String(_sunHour));
+  };
+  document.getElementById('g3d-sun-dawn') ?.addEventListener('click', () => _jumpSun(6));
+  document.getElementById('g3d-sun-noon') ?.addEventListener('click', () => _jumpSun(12));
+  document.getElementById('g3d-sun-dusk') ?.addEventListener('click', () => _jumpSun(18));
+  document.getElementById('g3d-sun-night')?.addEventListener('click', () => _jumpSun(0));
+  document.getElementById('g3d-sun-now')  ?.addEventListener('click', () => {
+    const d = new Date(); _jumpSun(d.getHours() + d.getMinutes() / 60);
+  });
 
   document.getElementById('g3d-shadows').addEventListener('change', (e) => {
     sunLight.castShadow = e.target.checked;
@@ -1890,6 +2016,16 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     // DevTools so far up that the viewport collapses) — gl.viewport with a
     // ~0 dimension floods the WebGL context with errors and breaks rendering.
     if (canvas.clientWidth < 8 || canvas.clientHeight < 8) return;
+
+    // Day-night playback: advance the simulated hour by real elapsed time.
+    if (_sunPlaying) {
+      const now = performance.now();
+      if (_sunClock) {
+        applyG3dSunHour(_sunHour + ((now - _sunClock) / 1000) * _sunSpeed);
+        _syncSunUI();
+      }
+      _sunClock = now;
+    }
     controls.update();
     // Per-frame LOD pipeline for Google Photorealistic 3D Tiles.
     //   setCamera + setResolutionFromRenderer feed the renderer the active
@@ -1927,12 +2063,8 @@ export async function openGoogle3DPanel(coords, modelUrl) {
 
   return {
     setSunHour(hour) {
-      const p = getSunParams(hour);
-      sunLight.intensity = Math.max(0.3, p.sunIntensity);
-      sunLight.color.setHex(p.sunColor);
-      sunLight.visible = !p.isNight;
-      const d = getSunDirectionECEF(lat, lon, p.azimut, p.elevation);
-      sunLight.position.copy(d.multiplyScalar(1e7));
+      applyG3dSunHour(hour);
+      _syncSunUI();
     },
   };
 }
