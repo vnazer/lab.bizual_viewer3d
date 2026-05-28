@@ -207,6 +207,7 @@ function ensureGoogleMapsJSLoaded(apiKey) {
     s.async = true;
     s.src = 'https://maps.googleapis.com/maps/api/js'
       + '?key=' + encodeURIComponent(apiKey)
+      + '&libraries=geometry'
       + '&callback=' + cb;
     s.onerror = () => { _gmapsJSPromise = null; reject(new Error('No se pudo cargar Maps JS')); };
     document.head.appendChild(s);
@@ -1159,30 +1160,59 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       });
       _svRenderer = new THREE.WebGLRenderer({
         canvas: svCanvas, alpha: true, antialias: true, preserveDrawingBuffer: true,
-        // Same as the main renderer — without log depth, single-precision
-        // depth at ECEF scale (~6.4 M m from origin) collapses and the
-        // overlaid model renders invisible / z-fights the panorama.
-        logarithmicDepthBuffer: true,
       });
       _svRenderer.setPixelRatio(window.devicePixelRatio);
       // Force a fully transparent clear so the Street View panorama shows
       // through every pixel that isn't part of the model.
       _svRenderer.setClearColor(0x000000, 0);
       _svScene = new THREE.Scene();
-      // Clone the loaded model so we have an instance to render in this
-      // separate scene without removing it from the main 3D view.
+
+      // Local-frame design: the three.js camera sits at the scene origin
+      // (the Street View "car" position) and the building is translated to
+      // its haversine offset (east/up/-north) from there. This avoids any
+      // floating-point precision issues that ECEF coords would introduce
+      // when the panorama camera moves and removes the need for log-depth.
+      //
+      // Wrap the GLB clone in a fresh group whose transform we own — we do
+      // NOT copy modelRoot.matrix here (that one is an ECEF world matrix
+      // and would teleport the clone far away).
       _svModelRoot = new THREE.Group();
-      _svModelRoot.matrixAutoUpdate = false;
-      const clone = modelRoot.children[0].clone(true);
+      const baseGltf = modelRoot.children[0]; // the GLB root after normalisation
+      const clone = baseGltf.clone(true);
+      // baseGltf already has the orientation (Y-up→Z-up rotation) and the
+      // bbox normalisation baked in via baseGltf.position + scale, so the
+      // clone arrives with its base at local z=0 and (x,y) centred on the
+      // origin of its parent. Reset its parent transform for the local
+      // frame: z-up GLB → in three.js's Y-up convention we'll rotate the
+      // whole group so model's "up" lines up with three.js's +Y.
       _svModelRoot.add(clone);
+      _svModelRoot.rotation.order = 'YXZ';
+      // The GLB was authored with Z-up; three.js camera (rotation YXZ) wants
+      // Y-up. Rotate -90° around X to flip Z→Y.
+      // We'll bake this in the group's matrix and then add yaw/pitch/roll
+      // from the user's sliders inside applySvModelTransform().
       _svScene.add(_svModelRoot);
-      // Match the model's material handling (depth, shadows) on the clone.
+
       _svModelRoot.traverse((o) => {
         if (!o.isMesh || !o.material) return;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         for (const m of mats) { m.depthTest = true; m.depthWrite = true; }
       });
-      _svCamera = new THREE.PerspectiveCamera(90, 1, 1, 5e7);
+
+      // Camera in the local frame: at origin, looking toward -Z (compass
+      // north). rotation.order YXZ matches the heading-then-pitch sequence
+      // the panorama uses. fov set on first sync.
+      _svCamera = new THREE.PerspectiveCamera(90, 1, 0.1, 10_000);
+      _svCamera.rotation.order = 'YXZ';
+      _svCamera.position.set(0, 0, 0);
+
+      // Match the main scene lighting roughly so the clone doesn't look
+      // unlit (the main scene's lights aren't shared between renderers).
+      _svScene.add(new THREE.AmbientLight(0xffffff, 0.7));
+      const svSun = new THREE.DirectionalLight(0xffffff, 0.9);
+      svSun.position.set(50, 80, 30);
+      _svScene.add(svSun);
+
       const sizeSV = () => {
         const w = svCanvas.clientWidth || 1, h = svCanvas.clientHeight || 1;
         _svRenderer.setSize(w, h, false);
@@ -1235,32 +1265,19 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     return (Math.atan2(y, x) / DEG2RAD + 360) % 360;
   }
 
-  // Snapshot of the panorama POV → three.js camera. Shared between the
-  // event listeners (instant response on user gesture) and the rAF loop
-  // (which keeps drawing the latest model transform every frame). Idempotent.
+  // POV → three.js camera (LOCAL FRAME, camera fixed at origin).
+  //   rotation.order = 'YXZ' so Y (heading) runs first, then X (pitch).
+  //   pov.heading is compass clockwise from north; three.js rotates
+  //     counterclockwise around +Y, so the sign flips.
+  //   pov.pitch is positive looking up, matches +X rotation in YXZ order.
+  //   fov ≈ 180 / 2^zoom (Street View's documented zoom→fov mapping).
   function syncSvCamera(reason) {
     if (!_svPanorama || !_svCamera) return false;
-    const pos = _svPanorama.getPosition();
     const pov = _svPanorama.getPov();
-    if (!pos || !pov) return false;
-    const pLat = pos.lat(), pLng = pos.lng();
-    const groundElev = (_apiElevation != null)
-      ? _apiElevation
-      : (_groundAnchor ? (_groundAnchor.length() - _targetSurface.length()) : 0);
-    const camPos = new THREE.Vector3();
-    WGS84_ELLIPSOID.getCartographicToPosition(pLat * DEG2RAD, pLng * DEG2RAD, groundElev + 2.5, camPos);
-    // Heading 0=N, 90=E (clockwise). Pitch 0=horizontal, +up.
-    const hRad = pov.heading * Math.PI / 180;
-    const pRad = pov.pitch   * Math.PI / 180;
-    const eV = new THREE.Vector3(), nV = new THREE.Vector3(), uV = new THREE.Vector3();
-    WGS84_ELLIPSOID.getEastNorthUpAxes(pLat * DEG2RAD, pLng * DEG2RAD, eV, nV, uV);
-    const lookDir = new THREE.Vector3()
-      .addScaledVector(eV, Math.sin(hRad) * Math.cos(pRad))
-      .addScaledVector(nV, Math.cos(hRad) * Math.cos(pRad))
-      .addScaledVector(uV, Math.sin(pRad));
-    _svCamera.position.copy(camPos);
-    _svCamera.up.copy(uV);
-    _svCamera.lookAt(camPos.clone().add(lookDir));
+    if (!pov) return false;
+    _svCamera.rotation.y = -pov.heading * DEG2RAD;
+    _svCamera.rotation.x =  pov.pitch   * DEG2RAD;
+    _svCamera.rotation.z = 0;
     const z = _svPanorama.getZoom() || 1;
     const fovDeg = Math.max(20, Math.min(120, 180 / Math.pow(2, z)));
     if (Math.abs(_svCamera.fov - fovDeg) > 0.05) {
@@ -1268,26 +1285,70 @@ export async function openGoogle3DPanel(coords, modelUrl) {
       _svCamera.updateProjectionMatrix();
     }
     if (reason) {
-      // Throttle the log: only fire on listener events, not every rAF frame.
       console.log('[Google 3D · SV] ' + reason + ' · heading=' + pov.heading.toFixed(1) +
                   '° pitch=' + pov.pitch.toFixed(1) + '° zoom=' + z.toFixed(2) +
                   ' → fov=' + fovDeg.toFixed(1) + '°');
     }
     return true;
   }
+
+  // Place the cloned model in the local SV frame.
+  //   Frame: +X = east, +Y = up, -Z = north (matches a camera at origin
+  //     looking toward -Z with rotation.y = -heading).
+  //   distance + bearing computed via google.maps.geometry.spherical when
+  //     available (sub-metre accuracy), with a Haversine fallback so the
+  //     overlay doesn't crash if the geometry lib didn't load.
+  //   Height: building base elevation - panorama camera height (= panorama
+  //     ground + 2.5 m observer offset). Negative dy means the base is
+  //     below the observer's eyes (the normal case at street level).
+  //   User offsets/rotations from the main panel sliders are layered on
+  //     top so the SV view honours manual nudges.
+  function applySvModelTransform() {
+    if (!_svPanorama || !_svModelRoot || !modelRoot) return;
+    const pos = _svPanorama.getPosition();
+    if (!pos) return;
+    const panoLat = pos.lat(), panoLng = pos.lng();
+
+    let distM, bearingDegFromPano;
+    if (window.google?.maps?.geometry?.spherical) {
+      const spherical = google.maps.geometry.spherical;
+      const a = new google.maps.LatLng(panoLat, panoLng);
+      const b = new google.maps.LatLng(lat, lon);
+      distM = spherical.computeDistanceBetween(a, b);
+      bearingDegFromPano = spherical.computeHeading(a, b); // -180..180 cw from north
+    } else {
+      distM = haversineMeters(panoLat, panoLng, lat, lon);
+      bearingDegFromPano = bearingDeg(panoLat, panoLng, lat, lon);
+    }
+    const bRad = bearingDegFromPano * DEG2RAD;
+    const dxEast  =  distM * Math.sin(bRad);
+    const dzMinusN = -distM * Math.cos(bRad); // -north
+    const panoGroundElev = (_apiElevation != null)
+      ? _apiElevation
+      : (_groundAnchor ? (_groundAnchor.length() - _targetSurface.length()) : 0);
+    const buildingGroundElev = panoGroundElev; // same ground anchor; user altura slider compensates
+    const dyUp = (buildingGroundElev - (panoGroundElev + 2.5)); // camera sits ~2.5 m above ground
+
+    _svModelRoot.position.set(
+      dxEast    + offsetE,
+      dyUp      + altOffset,
+      dzMinusN  - offsetN, // +N is -Z in this frame
+    );
+    // Z-up GLB clone → Y-up scene: -90° around X baked into the group.
+    // Then layer the user's yaw / pitch / roll sliders (which were
+    // authored around east/north/up in the main ENU frame and map
+    // cleanly to local +Y / +X / +Z here).
+    _svModelRoot.rotation.order = 'YXZ';
+    _svModelRoot.rotation.x = -Math.PI / 2 + pitchDeg * DEG2RAD;
+    _svModelRoot.rotation.y =  rotDeg * DEG2RAD;
+    _svModelRoot.rotation.z =  rollDeg * DEG2RAD;
+    _svModelRoot.scale.setScalar(scaleMx);
+  }
   function svAnimate() {
     _svAnimFrame = requestAnimationFrame(svAnimate);
     if (!_svRenderer || !_svScene || !_svCamera) return;
-    // Idle-state safety: don't render until the panorama has a position and
-    // pov (during first ~100 ms the panorama hasn't reported yet).
     if (!syncSvCamera(null)) return;
-    // Mirror the model's transform from the main scene (user offsets, scale,
-    // rotation all show through here). modelRoot.matrixAutoUpdate is off so
-    // applyGeoTransform() is the one source of truth for the world matrix.
-    if (modelRoot) {
-      _svModelRoot.matrix.copy(modelRoot.matrix);
-      _svModelRoot.matrixWorldNeedsUpdate = true;
-    }
+    applySvModelTransform();
     _svRenderer.render(_svScene, _svCamera);
   }
   function closeStreetViewOverlay() {
