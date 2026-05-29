@@ -124,7 +124,7 @@ export function mountCaptureEngine(ctx) {
   // ── UI: a control section in the side panel + an on-demand blocking modal ──
   const section = document.createElement('details');
   section.className = 'g3d-sec';
-  section.open = true;
+  section.open = false;
   section.innerHTML = `
     <summary>🎬 Cine &amp; captura</summary>
     <div class="g3d-sec-body">
