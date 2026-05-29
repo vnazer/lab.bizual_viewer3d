@@ -787,6 +787,17 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   cursor: grab;
 }
 #g3d-canvas:active { cursor: grabbing; }
+/* Night tint over the viewport (below the side panel/HUD). opacity is driven
+   by applyG3dSunHour; dark navy reads as night and dims the Maxar tiles too. */
+.g3d-night-overlay {
+  position: absolute;
+  top: 52px; left: 0; right: 0; bottom: 0;
+  background: #060a1c;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 500ms ease;
+}
 /* ── Side control panel (replaces the old bottom bar) ───────────────── */
 .g3d-side {
   position: absolute;

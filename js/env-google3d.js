@@ -617,6 +617,15 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   `;
   document.body.appendChild(panel);
 
+  // Night tint overlay — a translucent dark-navy layer over the viewport so the
+  // WHOLE scene (Maxar tiles included) reads as night, not just the model and
+  // sky. The Maxar photogrammetry ignores the model's lights AND tone-map
+  // exposure, so this overlay is the reliable way to darken the surroundings.
+  // Driven by applyG3dSunHour; sits below the side panel/HUD (z 40+).
+  const _nightOverlay = document.createElement('div');
+  _nightOverlay.className = 'g3d-night-overlay';
+  panel.appendChild(_nightOverlay);
+
   document.getElementById('btn-close-g3d').addEventListener('click', closeGoogle3DPanel);
   document.getElementById('btn-change-key').addEventListener('click', () => {
     const k = (prompt('Google Maps API key:', getGoogleApiKey()) || '').trim();
@@ -1057,10 +1066,12 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   const sunLight = new THREE.DirectionalLight(sunParams.sunColor, sunIntensity);
   sunLight.position.copy(sunDir.clone().multiplyScalar(1e7));
   sunLight.castShadow = false;
-  sunLight.shadow.bias = -0.0001;
-  sunLight.shadow.normalBias = 0.04;
+  sunLight.shadow.bias = -0.0002;
+  sunLight.shadow.normalBias = 0.05;
+  sunLight.shadow.mapSize.set(2048, 2048);
   sunLight.visible = !sunParams.isNight;
   scene.add(sunLight);
+  scene.add(sunLight.target);
   // Hemisphere fill: a gentle sky/ground bounce so shadowed faces don't
   // crush to black BEFORE the Maxar env-map bake lands. Kept low (0.45)
   // because once bakeEnvFromTiles() runs, scene.environment provides the
@@ -1069,6 +1080,41 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   // for the first couple of seconds and the shadow side.
   const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4a4a55, 0.45);
   scene.add(hemiLight);
+
+  // ── Shadows ──────────────────────────────────────────────────────────────
+  // The sun normally sits at 1e7 m (an "infinite" sun): right for lighting
+  // direction, but it puts the building far outside the shadow camera frustum,
+  // so nothing casts. When shadows are on we drop the light to building scale
+  // and size the ortho shadow frustum to the building — identical light
+  // direction, but now the shadow map actually covers the model + the ground
+  // around it. (castShadow checked first so _groundAnchor isn't read in its TDZ
+  // during the init call below.)
+  let _wantTileShadows = false;
+  function placeSun(dir) {
+    if (sunLight.castShadow && _groundAnchor) {
+      const bh = buildingHeightM();
+      const D = THREE.MathUtils.clamp(bh * 8, 500, 2500);
+      sunLight.position.copy(_groundAnchor).addScaledVector(dir, D);
+      sunLight.target.position.copy(_groundAnchor);
+      sunLight.target.updateMatrixWorld();
+      const half = THREE.MathUtils.clamp(bh * 1.5, 80, 500);
+      const cam = sunLight.shadow.camera;
+      cam.left = -half; cam.right = half; cam.top = half; cam.bottom = -half;
+      cam.near = Math.max(1, D - half * 2.5); cam.far = D + half * 2.5 + bh;
+      cam.updateProjectionMatrix();
+    } else {
+      sunLight.position.copy(dir.clone().multiplyScalar(1e7));
+    }
+  }
+  // The building's shadow only lands on the Maxar ground if the streamed tiles
+  // opt into receiveShadow — flag current + future tiles while shadows are on.
+  function setTilesReceiveShadow(on) {
+    _wantTileShadows = on;
+    tiles.group.traverse((c) => { if (c.isMesh) c.receiveShadow = on; });
+  }
+  tiles.addEventListener('load-model', (e) => {
+    if (_wantTileShadows && e.scene) e.scene.traverse((c) => { if (c.isMesh) c.receiveShadow = true; });
+  });
 
   // ─── Día / noche: hora del sol que reilumina el modelo ───────────────────
   // applyG3dSunHour drives, from a single hour-of-day value, the directional
@@ -1090,19 +1136,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     _sunHour = ((hour % 24) + 24) % 24;
     const p = getSunParams(_sunHour);
     const dir = getSunDirectionECEF(lat, lon, p.azimut, p.elevation);
-    sunLight.position.copy(dir.multiplyScalar(1e7));
+    placeSun(dir);                                     // far sun, or building-scale for shadows
     sunLight.color.setHex(p.sunColor);
     sunLight.intensity = p.isNight ? 0 : Math.min(1.5, p.sunIntensity);
     sunLight.visible   = !p.isNight;
     // 0 at/below the horizon → 1 at high sun. The single "how bright is it" term.
     const day  = THREE.MathUtils.clamp((p.elevation + 6) / 50, 0, 1);
     const dayS = day * day * (3 - 2 * day);            // smoothstep
-    // Global day/night brightness for the WHOLE scene (Maxar tiles, terrain and
-    // model) via tone-map exposure — the only lever that dims the tiles' baked
-    // daylight, so the building and its surroundings darken together. A gentle
-    // linear ramp on sun height; floor at 0.22 so deep night isn't pure black.
-    _expoMul = 0.22 + 0.78 * THREE.MathUtils.clamp((p.elevation + 10) / 60, 0, 1);
-    _applyExposure();
     // Hemisphere fill: faint cool moon-fill at night, full sky bounce by day.
     hemiLight.intensity = 0.12 + 0.4 * dayS;
     hemiLight.color.copy(_hemiNight).lerp(_hemiDay, dayS);
@@ -1116,6 +1156,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     skySphere.material.uniforms.bottomColor.value.copy(_skyNgtBot).lerp(_skyDayBot, dayS);
     if (p.isGoldenHour)
       skySphere.material.uniforms.bottomColor.value.lerp(_skySunTmp.setHex(p.sunColor), 0.45);
+    // Whole-scene night tint: the Maxar tiles ignore the model's lights AND the
+    // tone-map exposure, so a translucent dark-navy overlay is what actually
+    // darkens the surroundings. Tied to how far the sun is BELOW the horizon
+    // (not the general day factor) so golden hour / sunset stays bright and the
+    // tint only ramps in after the sun sets.
+    const nightF = THREE.MathUtils.clamp((3 - p.elevation) / 18, 0, 1);
+    if (_nightOverlay) _nightOverlay.style.opacity = (0.62 * nightF).toFixed(3);
   }
 
   function _syncSunUI() {
@@ -1167,8 +1214,13 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   });
 
   document.getElementById('g3d-shadows').addEventListener('change', (e) => {
-    sunLight.castShadow = e.target.checked;
-    if (modelRoot) modelRoot.traverse((c) => { if (c.isMesh) c.castShadow = e.target.checked; });
+    const on = e.target.checked;
+    sunLight.castShadow = on;
+    if (modelRoot) modelRoot.traverse((c) => { if (c.isMesh) { c.castShadow = on; c.receiveShadow = on; } });
+    setTilesReceiveShadow(on);   // building's shadow falls on the Maxar ground
+    // Shadows need the sun at building scale (not 1e7 m) — re-place it now.
+    const pp = getSunParams(_sunHour);
+    placeSun(getSunDirectionECEF(lat, lon, pp.azimut, pp.elevation));
   });
 
   // ─── Model load + geo transform ─────────────────────────────────────────
@@ -2183,24 +2235,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
   });
   tiles._cineCleanup = () => { try { _cine?.dispose(); } catch {} };
 
-  // ── Accordion: only one section expanded at a time, so the dense panel never
-  // overflows into a wall of clipped controls. Covers the dynamically-added
-  // Cine section too (it's already mounted as a direct child of #g3d-side).
-  (() => {
-    const side = document.getElementById('g3d-side');
-    if (!side) return;
-    let accLock = false;
-    const sections = () => Array.from(side.querySelectorAll(':scope > details.g3d-sec'));
-    for (const d of sections()) {
-      d.addEventListener('toggle', () => {
-        if (accLock || !d.open) return;
-        accLock = true;
-        for (const other of sections()) if (other !== d) other.open = false;
-        accLock = false;
-        d.scrollIntoView({ block: 'nearest' });
-      });
-    }
-  })();
+  // Sections are independently collapsible — several can stay open at once. The
+  // flex-shrink:0 + overflow-y:auto on .g3d-side keeps them from clipping each
+  // other (they just scroll), so no accordion is forced.
 
   return {
     setSunHour(hour) {
