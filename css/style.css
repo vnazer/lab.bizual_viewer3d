@@ -835,6 +835,9 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 8px;
   overflow: hidden;
+  /* Never let the flex column squash an open section below its content (that
+     clipped controls). Sections keep their natural height; .g3d-side scrolls. */
+  flex-shrink: 0;
 }
 .g3d-sec > summary {
   list-style: none;
@@ -933,6 +936,7 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   font-size: 11px;
   cursor: pointer;
   transition: all 150ms;
+  flex-shrink: 0;
 }
 #g3d-save:hover { background: rgba(40, 90, 200, 0.85); color: white; }
 

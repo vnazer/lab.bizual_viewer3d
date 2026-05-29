@@ -22,7 +22,7 @@ import { getSunParams, setSunDirection } from './sun-schedule.js?v=20260519';
 import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
-import { mountCaptureEngine } from './capture-engine.js?v=20260528e';
+import { mountCaptureEngine } from './capture-engine.js?v=20260528f';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
@@ -528,7 +528,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         </div>
       </details>
 
-      <details class="g3d-sec" open>
+      <details class="g3d-sec">
         <summary>🎥 Cámara &amp; vistas</summary>
         <div class="g3d-sec-body g3d-btn-grid">
           <button id="g3d-view-center" title="Lleva la cámara a un encuadre 3/4 del edificio (útil si lo perdés de vista al navegar).">📍 Centrar edificio</button>
@@ -540,7 +540,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         </div>
       </details>
 
-      <details class="g3d-sec" open>
+      <details class="g3d-sec">
         <summary>🎨 Render &amp; luz</summary>
         <div class="g3d-sec-body">
           <label title="Calidad de los tiles de Maxar. 10 = máximo detalle (carga más pesado).">🎯 Calidad
@@ -567,7 +567,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         </div>
       </details>
 
-      <details class="g3d-sec" open>
+      <details class="g3d-sec">
         <summary>☀️ Sol &amp; día-noche</summary>
         <div class="g3d-sec-body">
           <label title="Hora del día. Mueve el sol y reilumina el modelo (sol, cielo y rebote de luz).">🕐 Hora
@@ -592,7 +592,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
         </div>
       </details>
 
-      <details class="g3d-sec" open>
+      <details class="g3d-sec">
         <summary>🪟 Vidrios</summary>
         <div class="g3d-sec-body">
           <label title="Intensidad del reflejo del entorno en el vidrio. 0 = cristal plano sin reflejo (máxima estabilidad). Subir = más reflejo del barrio (puede titilar).">Reflejo
@@ -2182,6 +2182,25 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     },
   });
   tiles._cineCleanup = () => { try { _cine?.dispose(); } catch {} };
+
+  // ── Accordion: only one section expanded at a time, so the dense panel never
+  // overflows into a wall of clipped controls. Covers the dynamically-added
+  // Cine section too (it's already mounted as a direct child of #g3d-side).
+  (() => {
+    const side = document.getElementById('g3d-side');
+    if (!side) return;
+    let accLock = false;
+    const sections = () => Array.from(side.querySelectorAll(':scope > details.g3d-sec'));
+    for (const d of sections()) {
+      d.addEventListener('toggle', () => {
+        if (accLock || !d.open) return;
+        accLock = true;
+        for (const other of sections()) if (other !== d) other.open = false;
+        accLock = false;
+        d.scrollIntoView({ block: 'nearest' });
+      });
+    }
+  })();
 
   return {
     setSunHour(hour) {
