@@ -9,6 +9,7 @@ import { DRACOLoader }   from 'three/addons/loaders/DRACOLoader.js';
 import { KTX2Loader }    from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RGBELoader }    from 'three/addons/loaders/RGBELoader.js';
+import { EXRLoader }     from 'three/addons/loaders/EXRLoader.js';
 
 import { TilesRenderer, WGS84_ELLIPSOID } from '3d-tiles-renderer';
 import {
@@ -23,6 +24,7 @@ import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
 import { mountCaptureEngine } from './capture-engine.js?v=20260528f';
+import { mountHdrCapture } from './hdr-capture.js?v=20260528b';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
@@ -182,6 +184,8 @@ export function closeGoogle3DPanel() {
     if (_activeTiles._reAnchorTimer)   clearInterval(_activeTiles._reAnchorTimer);
     if (_activeTiles._envBakeTimer)    clearInterval(_activeTiles._envBakeTimer);
     if (_activeTiles._cineCleanup) { try { _activeTiles._cineCleanup(); } catch {} }
+    if (_activeTiles._hdrCleanup) { try { _activeTiles._hdrCleanup(); } catch {} }
+    if (_activeTiles._userEnvCleanup) { try { _activeTiles._userEnvCleanup(); } catch {} }
     if (_activeTiles._envCleanup) { try { _activeTiles._envCleanup(); } catch {} }
     if (_activeTiles._postfx)     { try { _activeTiles._postfx.dispose(); } catch {} }
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
@@ -537,6 +541,9 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           <button id="g3d-view-sv" title="Sobrepone el modelo 3D sobre las fotos panorámicas reales de Google Street View.">🎬 Modelo sobre SV</button>
           <button id="g3d-view-sv-tab" title="Abre Google Street View en una pestaña nueva (sin el modelo 3D encima).">🌆 SV (pestaña)</button>
           <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
+          <button id="g3d-hdr-capture" title="Captura un mapa de entorno equirectangular HDR (.hdr/.exr) del barrio real para usar como IBL/reflejos en el visor del micrositio.">📸 HDR entorno</button>
+          <button id="g3d-env-load" title="Cargá un .hdr/.exr (ej. el que acabás de capturar) y aplicalo como environment del visor — verificación de ida y vuelta: el edificio refleja el mapa y el cielo lo muestra.">🌐 HDR como entorno</button>
+          <input type="file" id="g3d-env-file" accept=".hdr,.exr,image/vnd.radiance,image/x-exr" style="display:none">
         </div>
       </details>
 
@@ -2234,6 +2241,75 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     },
   });
   tiles._cineCleanup = () => { try { _cine?.dispose(); } catch {} };
+
+  // ─── HDR environment capture (equirectangular .hdr / .exr) ────────────────
+  const _hdrCapture = mountHdrCapture({
+    renderer, scene, tiles,
+    panelRoot: document.getElementById('g3d-panel'),
+    buttonId: 'g3d-hdr-capture',
+    getCaptureBase: () => modelBaseWorld(),               // building base (ECEF), follows offsets
+    getFrame: () => ({ east: _east, north: _north, up: _up }),
+    getBuildingHeight: () => buildingHeightM(),
+    getModelRoot: () => modelRoot,
+    getSkySphere: () => skySphere,
+    getSun: (hour) => {
+      const p = getSunParams(hour);
+      return { dir: getSunDirectionECEF(lat, lon, p.azimut, p.elevation), color: p.sunColor, isNight: p.isNight };
+    },
+    getErrorTarget: () => tiles.errorTarget,
+    setErrorTarget: (v) => { tiles.errorTarget = v; },
+    minErrorTarget: calidadToErrorTarget(10),             // max detail (~0.1)
+    initialHour: _sunHour,
+    addrText: coords.display || `${lat.toFixed(5)}_${lon.toFixed(5)}`,
+  });
+  tiles._hdrCleanup = () => { try { _hdrCapture?.dispose(); } catch {} };
+
+  // ─── Load a captured .hdr/.exr back as the scene environment (round-trip) ──
+  // Verification loop in-tool: pick the .hdr/.exr just captured → PMREM it onto
+  // scene.environment (IBL + glass reflections) and show the equirect as the
+  // sky background. Toggling the button reverts to the previous environment.
+  let _userEnv = null;   // { tex, pmrem, prevEnv, prevBg, prevSkyVis }
+  function clearUserEnv(restore = true) {
+    if (!_userEnv) return;
+    if (restore) {
+      scene.environment = _userEnv.prevEnv;
+      scene.background  = _userEnv.prevBg;
+      if (skySphere) skySphere.visible = _userEnv.prevSkyVis;
+    }
+    try { _userEnv.pmrem.dispose(); } catch {}
+    try { _userEnv.tex.dispose(); } catch {}
+    _userEnv = null;
+  }
+  async function applyUserEnvFile(file) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const url = URL.createObjectURL(file);
+    try {
+      const loader = ext === 'exr' ? new EXRLoader() : new RGBELoader();
+      const tex = await loader.loadAsync(url);
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      const pm = pmrem.fromEquirectangular(tex).texture;
+      clearUserEnv(false);   // dispose any previous user env, keep its saved prev*
+      _userEnv = { tex, pmrem: pm, prevEnv: scene.environment, prevBg: scene.background, prevSkyVis: skySphere ? skySphere.visible : true };
+      scene.environment = pm;
+      scene.background = tex;
+      if (skySphere) skySphere.visible = false;
+    } finally { URL.revokeObjectURL(url); }
+  }
+  const _envLoadBtn = document.getElementById('g3d-env-load');
+  const _envFileInput = document.getElementById('g3d-env-file');
+  _envLoadBtn?.addEventListener('click', () => {
+    if (_userEnv) { clearUserEnv(true); _envLoadBtn.textContent = '🌐 HDR como entorno'; }
+    else _envFileInput?.click();
+  });
+  _envFileInput?.addEventListener('change', async () => {
+    const f = _envFileInput.files?.[0];
+    if (!f) return;
+    _envLoadBtn.disabled = true; _envLoadBtn.textContent = 'Cargando…';
+    try { await applyUserEnvFile(f); _envLoadBtn.textContent = '↩️ Restaurar entorno'; }
+    catch (e) { console.error('[env] load failed', e); alert('No se pudo cargar el HDR/EXR: ' + (e.message || e)); _envLoadBtn.textContent = '🌐 HDR como entorno'; }
+    finally { _envLoadBtn.disabled = false; _envFileInput.value = ''; }
+  });
+  tiles._userEnvCleanup = () => { try { clearUserEnv(false); } catch {} };
 
   // Sections are independently collapsible — several can stay open at once. The
   // flex-shrink:0 + overflow-y:auto on .g3d-side keeps them from clipping each
