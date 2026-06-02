@@ -23,6 +23,7 @@ import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
 import { mountCaptureEngine } from './capture-engine.js?v=20260528f';
+import { mountHdrCapture } from './hdr-capture.js?v=20260528a';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.
@@ -182,6 +183,7 @@ export function closeGoogle3DPanel() {
     if (_activeTiles._reAnchorTimer)   clearInterval(_activeTiles._reAnchorTimer);
     if (_activeTiles._envBakeTimer)    clearInterval(_activeTiles._envBakeTimer);
     if (_activeTiles._cineCleanup) { try { _activeTiles._cineCleanup(); } catch {} }
+    if (_activeTiles._hdrCleanup) { try { _activeTiles._hdrCleanup(); } catch {} }
     if (_activeTiles._envCleanup) { try { _activeTiles._envCleanup(); } catch {} }
     if (_activeTiles._postfx)     { try { _activeTiles._postfx.dispose(); } catch {} }
     if (_activeTiles._svCleanup) { try { _activeTiles._svCleanup(); } catch {} }
@@ -537,6 +539,7 @@ export async function openGoogle3DPanel(coords, modelUrl) {
           <button id="g3d-view-sv" title="Sobrepone el modelo 3D sobre las fotos panorámicas reales de Google Street View.">🎬 Modelo sobre SV</button>
           <button id="g3d-view-sv-tab" title="Abre Google Street View en una pestaña nueva (sin el modelo 3D encima).">🌆 SV (pestaña)</button>
           <button id="g3d-capture" title="Descargar captura de pantalla del visor actual como PNG.">📷 Capturar</button>
+          <button id="g3d-hdr-capture" title="Captura un mapa de entorno equirectangular HDR (.hdr/.exr) del barrio real para usar como IBL/reflejos en el visor del micrositio.">📸 HDR entorno</button>
         </div>
       </details>
 
@@ -2234,6 +2237,28 @@ export async function openGoogle3DPanel(coords, modelUrl) {
     },
   });
   tiles._cineCleanup = () => { try { _cine?.dispose(); } catch {} };
+
+  // ─── HDR environment capture (equirectangular .hdr / .exr) ────────────────
+  const _hdrCapture = mountHdrCapture({
+    renderer, scene, tiles,
+    panelRoot: document.getElementById('g3d-panel'),
+    buttonId: 'g3d-hdr-capture',
+    getCaptureBase: () => modelBaseWorld(),               // building base (ECEF), follows offsets
+    getFrame: () => ({ east: _east, north: _north, up: _up }),
+    getBuildingHeight: () => buildingHeightM(),
+    getModelRoot: () => modelRoot,
+    getSkySphere: () => skySphere,
+    getSun: (hour) => {
+      const p = getSunParams(hour);
+      return { dir: getSunDirectionECEF(lat, lon, p.azimut, p.elevation), color: p.sunColor, isNight: p.isNight };
+    },
+    getErrorTarget: () => tiles.errorTarget,
+    setErrorTarget: (v) => { tiles.errorTarget = v; },
+    minErrorTarget: calidadToErrorTarget(10),             // max detail (~0.1)
+    initialHour: _sunHour,
+    addrText: coords.display || `${lat.toFixed(5)}_${lon.toFixed(5)}`,
+  });
+  tiles._hdrCleanup = () => { try { _hdrCapture?.dispose(); } catch {} };
 
   // Sections are independently collapsible — several can stay open at once. The
   // flex-shrink:0 + overflow-y:auto on .g3d-side keeps them from clipping each

@@ -1035,6 +1035,19 @@ body.nav-fps.pointer-locked #canvas-wrap canvas { cursor: none; }
   cursor: pointer;
 }
 .g3d-cine-cancel:hover { background: rgba(220, 60, 60, 0.5); color: #fff; }
+
+/* HDR environment capture modal */
+.g3d-hdr-card { width: min(460px, 88%); text-align: left; }
+.g3d-hdr-form { display: flex; flex-direction: column; gap: 11px; margin: 8px 0 14px; }
+.g3d-hdr-form > label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: rgba(255, 255, 255, 0.78); }
+.g3d-hdr-form > label > input[type="range"] { flex: 1; min-width: 0; accent-color: #4285f4; }
+.g3d-hdr-form > label > span { font-family: ui-monospace, monospace; font-size: 11px; color: #7db8ff; min-width: 52px; text-align: right; }
+.g3d-hdr-form .g3d-cine-select { margin-left: auto; max-width: 62%; }
+.g3d-hdr-check { font-size: 11px !important; line-height: 1.35; align-items: flex-start !important; }
+.g3d-hdr-check input { margin: 2px 4px 0 0; }
+.g3d-hdr-progress { margin: 4px 0 14px; }
+.g3d-hdr-btns { display: flex; gap: 8px; justify-content: flex-end; }
+.g3d-hdr-btns .g3d-cine-go, .g3d-hdr-btns .g3d-cine-cancel { margin: 0; }
 .g3d-cine-divider {
   font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
   color: rgba(255, 255, 255, 0.4);
