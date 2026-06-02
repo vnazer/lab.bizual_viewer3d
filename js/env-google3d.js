@@ -23,7 +23,7 @@ import { hasCustomHDRI, loadCustomHDRI } from './hdri-store.js?v=20260519';
 import { sanitizeGLB } from './sanitize.js?v=20260519';
 import { PostFX } from './postfx.js?v=20260519';
 import { mountCaptureEngine } from './capture-engine.js?v=20260528f';
-import { mountHdrCapture } from './hdr-capture.js?v=20260528a';
+import { mountHdrCapture } from './hdr-capture.js?v=20260528b';
 
 // Shared LS prefix with viewer.js so the main UI sliders and the Google 3D
 // panel agree on values. JSON-encoded to match the viewer's `ls.set/get`.

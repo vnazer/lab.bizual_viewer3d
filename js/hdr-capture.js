@@ -195,28 +195,41 @@ async function waitTilesHD(tiles, cubeCam, faceRes, timeoutMs, onPending, isCanc
   return { partial };
 }
 
-async function encodeEXR(renderer, rt) {
+// OpenEXR compression ids (module-local in three's EXRExporter, not exported).
+export const EXR_NONE = 0, EXR_ZIP = 3;
+
+// three@0.184 EXRExporter: `async parse(renderer, renderTarget, options) -> Promise<Uint8Array>`,
+// options = { type: HalfFloatType|FloatType, compression }. It READS the render
+// target (no re-render), so .hdr and .exr both come from the one captured RT.
+// `exrType` = output bit depth (HalfFloatType=16-bit / FloatType=32-bit),
+// independent of the RT's own type.
+async function encodeEXR(renderer, rt, exrType, compression) {
   try {
     const { EXRExporter } = await import('three/addons/exporters/EXRExporter.js');
     const exporter = new EXRExporter();
-    let res = exporter.parse(renderer, rt, { type: THREE.HalfFloatType });
+    let res = exporter.parse(renderer, rt, { type: exrType, compression });
     if (res && typeof res.then === 'function') res = await res;
     return new Blob([res], { type: 'image/x-exr' });
   } catch (e) {
-    console.warn('[hdr] EXR export failed → falling back to .hdr', e);
+    console.warn('[hdr] EXR export failed', e);
     return null;
   }
 }
 
 // ─── core capture pipeline ───────────────────────────────────────────────────
-// Returns { blob, ext, W, H, partial }. Restores ALL state + disposes temporaries
-// in the finally block (no leaks), even on error / context loss.
+// ONE capture (single cubemap render + single equirect projection); the chosen
+// formats (.hdr and/or .exr) are then encoded from the SAME equirect render
+// target — no re-render. Returns { files:[{blob,ext}], W, H, partial }. Restores
+// ALL state + disposes temporaries in finally (no leaks), even on error.
 async function captureEnvironmentHDR(opts) {
   const {
     renderer, scene, tiles, point, east, north, up, faceRes, includeSky, sun,
-    format, modelRoot, skySphere, getErrorTarget, setErrorTarget, minErrorTarget,
+    formats, exrType, exrCompression,
+    modelRoot, skySphere, getErrorTarget, setErrorTarget, minErrorTarget,
     onProgress, isCancelled,
   } = opts;
+  const wantHDR = formats.includes('hdr');
+  const wantEXR = formats.includes('exr');
 
   const prevTone = renderer.toneMapping;
   const prevErr = getErrorTarget();
@@ -280,16 +293,25 @@ async function captureEnvironmentHDR(opts) {
     fsQuad.render(renderer);
     renderer.setRenderTarget(null);
 
-    // 4) Read float pixels + encode.
-    onProgress('Codificando ' + (format === 'exr' ? 'EXR' : 'HDR') + '…', 0.8);
-    let blob = null, ext = format;
-    if (format === 'exr') blob = await encodeEXR(renderer, equirectRT);
-    if (!blob) {
+    // 4) Encode the chosen formats from the SAME equirect RT (no re-render).
+    const files = [];
+    if (wantHDR) {
+      onProgress('Codificando HDR…', 0.8);
       const floatData = readRTFloat(renderer, equirectRT, W, H);
-      blob = new Blob([encodeHDR(floatData, W, H)], { type: 'image/vnd.radiance' });
-      ext = 'hdr';
+      files.push({ blob: new Blob([encodeHDR(floatData, W, H)], { type: 'image/vnd.radiance' }), ext: 'hdr' });
     }
-    return { blob, ext, W, H, partial };
+    if (wantEXR) {
+      onProgress('Codificando EXR…', 0.9);
+      const exrBlob = await encodeEXR(renderer, equirectRT, exrType, exrCompression);
+      if (exrBlob) files.push({ blob: exrBlob, ext: 'exr' });
+      else if (!files.length) {
+        // EXR failed and nothing else requested → fall back to .hdr so the user
+        // still gets a usable file instead of an empty result.
+        const floatData = readRTFloat(renderer, equirectRT, W, H);
+        files.push({ blob: new Blob([encodeHDR(floatData, W, H)], { type: 'image/vnd.radiance' }), ext: 'hdr' });
+      }
+    }
+    return { files, W, H, partial };
   } finally {
     renderer.setRenderTarget(null);
     renderer.toneMapping = prevTone;
@@ -363,13 +385,26 @@ export function mountHdrCapture(ctx) {
             <input type="range" id="g3d-hdr-hour" min="0" max="24" step="0.5" value="${(ctx.initialHour ?? 12).toFixed(1)}">
             <span id="g3d-hdr-hour-val"></span>
           </label>
-          <label title="Formato del archivo. .hdr (Radiance RGBE) es el estándar para environment maps.">Formato
+          <label title=".hdr (Radiance RGBE): compatible con el pipeline de producción (RGBELoader). .exr (OpenEXR): float real por canal, master de máxima fidelidad (menos banding en degradados).">Formato
             <select id="g3d-hdr-format" class="g3d-cine-select">
-              <option value="hdr" selected>.hdr (Radiance)</option>
-              <option value="exr">.exr (OpenEXR)</option>
+              <option value="both" selected>Ambos (.hdr + .exr)</option>
+              <option value="hdr">Solo .hdr (Radiance)</option>
+              <option value="exr">Solo .exr (OpenEXR)</option>
             </select>
           </label>
-          <label class="g3d-hdr-check" title="Los tiles de Google son LDR (8-bit): sin esto el .hdr no tiene rango dinámico real y solo sirve para reflejos/fondo. Con el cielo procedural HDR + sol, el mapa ilumina físicamente (sol con valores ≫1).">
+          <label id="g3d-hdr-depth-wrap" title="Profundidad del EXR. La fidelidad real la limita la fuente (tiles LDR): el 32-bit solo aporta sobre el rango dinámico del cielo procedural + sol — mantené el modo híbrido ON para aprovecharlo.">Profundidad EXR
+            <select id="g3d-hdr-depth" class="g3d-cine-select">
+              <option value="16" selected>16-bit (suficiente, liviano)</option>
+              <option value="32">32-bit (máxima precisión, pesado)</option>
+            </select>
+          </label>
+          <label id="g3d-hdr-compress-wrap" title="ZIP es sin pérdida y reduce bastante el peso. Sin compresión = master crudo más pesado.">Compresión EXR
+            <select id="g3d-hdr-compress" class="g3d-cine-select">
+              <option value="zip" selected>ZIP (sin pérdida)</option>
+              <option value="none">Sin compresión</option>
+            </select>
+          </label>
+          <label class="g3d-hdr-check" title="Los tiles de Google son LDR (8-bit): sin esto el .hdr/.exr no tiene rango dinámico real y solo sirve para reflejos/fondo. Con el cielo procedural HDR + sol, el mapa ilumina físicamente (sol con valores ≫1) — es lo que le da sentido al EXR de alta precisión.">
             <input type="checkbox" id="g3d-hdr-sky" checked> Incluir cielo procedural con sol (recomendado)
           </label>
           <div class="g3d-hint" id="g3d-hdr-note"></div>
@@ -389,25 +424,36 @@ export function mountHdrCapture(ctx) {
     const resSel = $('g3d-hdr-res'), hInp = $('g3d-hdr-height'), hVal = $('g3d-hdr-height-val');
     const hourInp = $('g3d-hdr-hour'), hourVal = $('g3d-hdr-hour-val');
     const fmtSel = $('g3d-hdr-format'), skyChk = $('g3d-hdr-sky'), noteEl = $('g3d-hdr-note');
+    const depthSel = $('g3d-hdr-depth'), compressSel = $('g3d-hdr-compress');
+    const depthWrap = $('g3d-hdr-depth-wrap'), compressWrap = $('g3d-hdr-compress-wrap');
     const fmtHour = (v) => { const t = (Math.round(v * 60) % 1440 + 1440) % 1440; return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
     const refreshNote = () => {
       const r = parseInt(resSel.value, 10);
-      noteEl.innerHTML = `Equirect <b>${r * 2}×${r}</b>. ${r >= 4096 ? '⚠️ 4096 puede fallar por memoria en GPUs limitadas — si falla, usá 2048.' : ''}`;
+      noteEl.innerHTML = `Equirect <b>${r * 2}×${r}</b>. ${r >= 4096 ? '⚠️ 4096 (sobre todo "Ambos") puede ser pesado en memoria — si falla, bajá a 2048 o generá un formato a la vez.' : ''}`;
+    };
+    // EXR sub-options only matter when an EXR is being produced.
+    const syncExrOpts = () => {
+      const showExr = fmtSel.value === 'exr' || fmtSel.value === 'both';
+      depthWrap.style.display = showExr ? '' : 'none';
+      compressWrap.style.display = showExr ? '' : 'none';
     };
     hInp.addEventListener('input', () => { hVal.textContent = hInp.value + ' m'; });
     hourInp.addEventListener('input', () => { hourVal.textContent = fmtHour(parseFloat(hourInp.value)); });
     resSel.addEventListener('change', refreshNote);
+    fmtSel.addEventListener('change', syncExrOpts);
     hourVal.textContent = fmtHour(parseFloat(hourInp.value));
-    refreshNote();
+    refreshNote(); syncExrOpts();
 
     $('g3d-hdr-cancel').addEventListener('click', () => { if (busy) { cancelled = true; } else close(); });
     $('g3d-hdr-go').addEventListener('click', () => run({
       faceRes: parseInt(resSel.value, 10),
       captureHeight: parseFloat(hInp.value),
       hour: parseFloat(hourInp.value),
-      format: fmtSel.value,
+      formats: fmtSel.value === 'both' ? ['hdr', 'exr'] : [fmtSel.value],
+      exrType: depthSel.value === '32' ? THREE.FloatType : THREE.HalfFloatType,
+      exrCompression: compressSel.value === 'none' ? EXR_NONE : EXR_ZIP,
       includeSky: skyChk.checked,
-    }, { resSel, hInp, hourInp, fmtSel, skyChk, goBtn: $('g3d-hdr-go') }));
+    }, { goBtn: $('g3d-hdr-go') }));
   }
 
   async function run(o, els) {
@@ -429,17 +475,25 @@ export function mountHdrCapture(ctx) {
       const result = await captureEnvironmentHDR({
         renderer: ctx.renderer, scene: ctx.scene, tiles: ctx.tiles,
         point, east, north, up, faceRes: o.faceRes, includeSky: o.includeSky, sun,
-        format: o.format, modelRoot: ctx.getModelRoot(), skySphere: ctx.getSkySphere(),
+        formats: o.formats, exrType: o.exrType, exrCompression: o.exrCompression,
+        modelRoot: ctx.getModelRoot(), skySphere: ctx.getSkySphere(),
         getErrorTarget: ctx.getErrorTarget, setErrorTarget: ctx.setErrorTarget, minErrorTarget: ctx.minErrorTarget,
         onProgress, isCancelled: () => cancelled,
       });
-      if (cancelled || !result) { onProgress('Cancelado.', 0); }
+      if (cancelled || !result || !result.files.length) { onProgress('Cancelado.', 0); }
       else {
         const secs = ((performance.now() - t0) / 1000).toFixed(1);
-        const mb = (result.blob.size / 1048576).toFixed(1);
-        const name = `entorno_${slugify(ctx.addrText)}_${dateStamp()}.${result.ext}`;
-        download(result.blob, name);
-        onProgress(`✅ ${name} · ${result.W}×${result.H} · ${mb} MB · ${secs}s`, 1);
+        const slug = `entorno_${slugify(ctx.addrText)}_${dateStamp()}`;
+        const lines = [];
+        // Single capture → download each requested format (staggered so the
+        // browser doesn't block the second download).
+        for (let i = 0; i < result.files.length; i++) {
+          const f = result.files[i];
+          const name = `${slug}.${f.ext}`;
+          setTimeout(() => download(f.blob, name), i * 350);
+          lines.push(`${f.ext.toUpperCase()} ${(f.blob.size / 1048576).toFixed(1)} MB`);
+        }
+        onProgress(`✅ ${result.W}×${result.H} · ${lines.join(' + ')} · ${secs}s`, 1);
         if (result.partial) {
           const warn = document.createElement('div');
           warn.className = 'g3d-hint';
